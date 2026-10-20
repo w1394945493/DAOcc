@@ -102,8 +102,8 @@ def visualize_camera(
             ]:
                 cv2.line(
                     canvas,
-                    coords[index, start].astype(np.int),
-                    coords[index, end].astype(np.int),
+                    coords[index, start].astype(np.int32),
+                    coords[index, end].astype(np.int32),
                     color or OBJECT_PALETTE[name],
                     thickness,
                     cv2.LINE_AA,
@@ -111,8 +111,11 @@ def visualize_camera(
         canvas = canvas.astype(np.uint8)
     canvas = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
 
-    mmcv.mkdir_or_exist(os.path.dirname(fpath))
-    mmcv.imwrite(canvas, fpath)
+    # 不指定路径时只返回已绘制的图像，供环视拼图使用，不生成单路文件。
+    if fpath is not None:
+        mmcv.mkdir_or_exist(os.path.dirname(fpath))
+        mmcv.imwrite(canvas, fpath)
+    return canvas
 
 
 def visualize_lidar(

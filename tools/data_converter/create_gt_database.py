@@ -176,6 +176,11 @@ def create_groundtruth_database(
         )
 
     elif dataset_class_name == "NuScenesDataset":
+        #* 数据集没有默认 CLASSES，显式传入与 configs/nuscenes/default.yaml 一致的类别顺序。
+        dataset_cfg.update(object_classes=[
+            "car", "truck", "construction_vehicle", "bus", "trailer",
+            "barrier", "motorcycle", "bicycle", "pedestrian", "traffic_cone",
+        ])
         if not load_augmented:
             dataset_cfg.update(
                 use_valid_flag=True,
@@ -320,7 +325,11 @@ def create_groundtruth_database(
         for i in range(num_obj):
             filename = f"{image_idx}_{names[i]}_{i}.bin"
             abs_filepath = osp.join(database_save_path, filename)
-            rel_filepath = osp.join(f"{info_prefix}_gt_database", filename)
+            #* 数据库可位于原始数据目录之外，记录相对 data_path 的真实路径供采样器读取。
+            rel_filepath = (
+                osp.relpath(abs_filepath, data_path)
+                if relative_path else osp.abspath(abs_filepath)
+            )
 
             # save point clouds and image patches for each object
             gt_points = points[point_indices[:, i]]

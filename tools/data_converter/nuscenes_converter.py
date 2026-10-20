@@ -40,7 +40,7 @@ nus_attributes = (
 
 
 def create_nuscenes_infos(
-    root_path, info_prefix, version="v1.0-trainval", max_sweeps=10
+    root_path, info_prefix, version="v1.0-trainval", max_sweeps=10, out_dir=None
 ):
     """Create info file of nuscene dataset.
 
@@ -53,8 +53,13 @@ def create_nuscenes_infos(
             Default: 'v1.0-trainval'
         max_sweeps (int): Max number of sweeps.
             Default: 10
+        out_dir (str, optional): Output directory; defaults to root_path.
     """
     from nuscenes.nuscenes import NuScenes
+
+    #* 原始数据仍从 root_path 读取，生成的 info 写入 out_dir；兼容旧调用。
+    out_dir = root_path if out_dir is None else out_dir
+    mmcv.mkdir_or_exist(out_dir)
 
     nusc = NuScenes(version=version, dataroot=root_path, verbose=True)
     from nuscenes.utils import splits
@@ -103,7 +108,7 @@ def create_nuscenes_infos(
     if test:
         print("test sample: {}".format(len(train_nusc_infos)))
         data = dict(infos=train_nusc_infos, metadata=metadata)
-        info_path = osp.join(root_path, "{}_infos_test.pkl".format(info_prefix))
+        info_path = osp.join(out_dir, "{}_infos_test.pkl".format(info_prefix))
         mmcv.dump(data, info_path)
     else:
         print(
@@ -112,10 +117,10 @@ def create_nuscenes_infos(
             )
         )
         data = dict(infos=train_nusc_infos, metadata=metadata)
-        info_path = osp.join(root_path, "{}_infos_train.pkl".format(info_prefix))
+        info_path = osp.join(out_dir, "{}_infos_train.pkl".format(info_prefix))
         mmcv.dump(data, info_path)
         data["infos"] = val_nusc_infos
-        info_val_path = osp.join(root_path, "{}_infos_val.pkl".format(info_prefix))
+        info_val_path = osp.join(out_dir, "{}_infos_val.pkl".format(info_prefix))
         mmcv.dump(data, info_val_path)
 
 

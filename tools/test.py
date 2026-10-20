@@ -1,5 +1,6 @@
 import argparse
 import copy
+import json
 import os
 import warnings
 
@@ -28,7 +29,9 @@ def parse_args():
     parser.add_argument("config", help="test config file path")
     parser.add_argument("checkpoint", help="checkpoint file")
     parser.add_argument("--dist", action='store_true', help="distributed or not")
-    parser.add_argument("--out", help="output result file in pickle format")
+    # 原参数用于把全部预测写入一个文件，注释保留；现在使用 --out-dir 指定目录。
+    # parser.add_argument("--out", help="output result file in pickle format")
+    parser.add_argument("--out-dir", help="output root for scene/sample_token.pkl prediction files")
     parser.add_argument(
         "--fuse-conv-bn",
         action="store_true",
@@ -117,6 +120,84 @@ def parse_args():
     return args
 
 
+
+def prediction_paths(dataset, out_dir):
+    # 推理前一次性解析所有帧的场景路径，避免每帧重复读取 nuScenes 数据表。
+    infos = getattr(dataset, "data_infos", None)
+    # nuScenes 的 sample.json 记录每帧所属场景，scene.json 提供可读场景名。
+    # 直接读取数据表，不重复初始化 NuScenes，也不依赖 occupancy 标注目录的命名。
+    sample_scenes = None
+    version = getattr(dataset, "version", "")
+    if version in ("v1.0-mini", "v1.0-trainval", "v1.0-test"):
+        table_dir = os.path.join(dataset.dataset_root, version)
+        with open(os.path.join(table_dir, "scene.json")) as f:
+            scene_names = {scene["token"]: scene["name"] for scene in json.load(f)}
+        with open(os.path.join(table_dir, "sample.json")) as f:
+            sample_scenes = {
+                sample["token"]: scene_names[sample["scene_token"]]
+                for sample in json.load(f)
+            }
+        if infos is None or len(infos) != len(dataset):
+            raise ValueError("nuScenes data_infos must match prediction count")
+
+    filenames = []
+    for index in range(len(dataset)):
+        # nuScenes 使用 sample token 命名；其他数据集没有 token 时使用样本序号。
+        token = infos[index].get("token") if infos is not None else None
+        name = str(token) if token is not None else f"sample_{index:06d}"
+        # 文件名必须是单个路径组件，避免意外写到指定目录之外。
+        if not name or name in (".", "..") or "/" in name or "\\" in name:
+            raise ValueError(f"Invalid sample filename: {name!r}")
+        # 原来所有帧平铺在输出根目录，注释保留。
+        # filenames.append(name + ".pkl")
+        if sample_scenes is not None:
+            # 不允许未知帧静默落入错误场景；全部路径验证通过后才开始写文件。
+            if token not in sample_scenes:
+                raise ValueError(f"Sample token missing from nuScenes tables: {token!r}")
+            scene_name = sample_scenes[token]
+            if (not scene_name or scene_name in (".", "..")
+                    or "/" in scene_name or "\\" in scene_name):
+                raise ValueError(f"Invalid scene directory name: {scene_name!r}")
+            filenames.append(os.path.join(scene_name, name + ".pkl"))
+        else:
+            # 其他数据集没有 nuScenes 场景表，维持原来的逐帧平铺保存方式。
+            filenames.append(name + ".pkl")
+    # 写入前检查重名，避免同一次评估中不同样本相互覆盖。
+    if len(set(filenames)) != len(filenames):
+        raise ValueError("Duplicate sample tokens: prediction filenames would collide")
+    return [os.path.join(out_dir, filename) for filename in filenames]
+
+
+def install_prediction_writer(model, data_loader, out_dir):
+    # 测试加载器 shuffle=False，标准顺序/分布式采样器可重复遍历且顺序一致。
+    # 按本进程 batch_sampler 的实际索引匹配结果，兼容单卡、多卡和 batch size > 1。
+    paths = prediction_paths(data_loader.dataset, out_dir)
+    batches = iter(data_loader.batch_sampler)
+    rank, _ = get_dist_info()
+
+    def save_after_forward(module, inputs, outputs):
+        indices = next(batches)
+        if len(indices) != len(outputs):
+            raise ValueError("Prediction count does not match current batch indices")
+        for index, prediction in zip(indices, outputs):
+            output_path = paths[index]
+            mmcv.mkdir_or_exist(os.path.dirname(output_path))
+            # 先写本进程临时文件再原子替换，避免中断留下半个 pkl。
+            # 分布式采样补齐可能重复最后几帧；不同进程临时文件互不冲突。
+            temporary_path = f"{output_path}.rank{rank}.pid{os.getpid()}.tmp"
+            try:
+                mmcv.dump(prediction, temporary_path, file_format="pkl")
+                os.replace(temporary_path, output_path)
+            finally:
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
+
+    # forward hook 在当前 batch 返回后、下一 batch 推理前立即保存每帧预测。
+    # 原始 outputs 不作修改，推理函数继续收集它们用于完整数据集评估。
+    return model.register_forward_hook(save_after_forward)
+
+
+
 def main():
     args = parse_args()
     if args.dist:
@@ -128,17 +209,23 @@ def main():
     else:
         torch.cuda.set_device(0)
 
-    assert args.out or args.eval or args.format_only or args.show or args.show_dir, (
+    # 保存操作改为检查输出目录，其余评估和可视化选项保持原逻辑。
+    # assert args.out or args.eval or args.format_only or args.show or args.show_dir, (
+    assert args.out_dir or args.eval or args.format_only or args.show or args.show_dir, (
         "Please specify at least one operation (save/eval/format/show the "
-        'results / save the results) with the argument "--out", "--eval"'
+        'results / save the results) with the argument "--out-dir", "--eval"'
         ', "--format-only", "--show" or "--show-dir"'
     )
 
     if args.eval and args.format_only:
         raise ValueError("--eval and --format_only cannot be both specified")
 
-    if args.out is not None and not args.out.endswith((".pkl", ".pickle")):
-        raise ValueError("The output file must be a pkl file.")
+    # 原检查针对单个 pkl 文件；新参数为目录，不再要求 .pkl 后缀。
+    # if args.out is not None and not args.out.endswith((".pkl", ".pickle")):
+    #     raise ValueError("The output file must be a pkl file.")
+    if args.out_dir:
+        args.out_dir = os.path.abspath(os.path.expanduser(args.out_dir))
+        mmcv.mkdir_or_exist(args.out_dir)
 
     configs.load(args.config, recursive=True)
     cfg = Config(recursive_eval(configs), filename=args.config)
@@ -215,22 +302,40 @@ def main():
 
     if not distributed:
         model = MMDataParallel(model, device_ids=[0])
-        outputs = single_gpu_test(model, data_loader)
+        # 原调用保留在下方统一执行，先完成模型包装再安装逐帧保存钩子。
+        # outputs = single_gpu_test(model, data_loader)
     else:
         model = MMDistributedDataParallel(
             model.cuda(),
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False,
         )
-        outputs = multi_gpu_test(model, data_loader, args.tmpdir, args.gpu_collect)
+        # outputs = multi_gpu_test(model, data_loader, args.tmpdir, args.gpu_collect)
+    # 只有指定输出目录才安装保存钩子；没有指定时保持原推理行为。
+    writer = install_prediction_writer(model, data_loader, args.out_dir) if args.out_dir else None
+    try:
+        if not distributed:
+            outputs = single_gpu_test(model, data_loader)
+        else:
+            outputs = multi_gpu_test(model, data_loader, args.tmpdir, args.gpu_collect)
+    finally:
+        # 推理结束或异常退出均移除钩子，已完成写入的预测文件保留。
+        if writer is not None:
+            writer.remove()
     if distributed:
         rank, _ = get_dist_info()
     else:
         rank = 0
     if rank == 0:
-        if args.out:
-            print(f"\nwriting results to {args.out}")
-            mmcv.dump(outputs, args.out)
+        # 原整批保存代码注释保留，改为每个样本保存一个 pkl。
+        # if args.out:
+        #     print(f"\nwriting results to {args.out}")
+        #     mmcv.dump(outputs, args.out)
+        # 原推理结束后统一保存的代码注释保留，避免再次写入全部结果。
+        # if args.out_dir:
+        #     save_sample_predictions(outputs, dataset, args.out_dir)
+        if args.out_dir:
+            print(f"Per-frame predictions saved during inference to {args.out_dir}")
         kwargs = {} if args.eval_options is None else args.eval_options
         if args.format_only:
             dataset.format_results(outputs, **kwargs)

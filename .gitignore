@@ -120,3 +120,4 @@ mmdet3d/.mim
 
 # Pytorch
 *.pth
+results/

@@ -101,7 +101,7 @@ train_pipeline:
     type: ImageNormalize
     mean: [0.485, 0.456, 0.406]
     std: [0.229, 0.224, 0.225]
-  - 
+  -
     type: GridMask
     use_h: true
     use_w: true
@@ -152,7 +152,7 @@ test_pipeline:
     load_augmented: ${load_augmented}
   -
     type: LoadPointsFromMultiSweeps
-    sweeps_num: 9
+    sweeps_num: 9 # * 当前关键帧 + 9个历史扫描真，历史点云对齐到当前 LiDAR 坐标系后合并，再进行一次模型推理。
     load_dim: ${load_dim}
     use_dim: ${use_dim}
     reduce_beams: ${reduce_beams}
@@ -253,4 +253,4 @@ data:
 evaluation:
   interval: 1
   pipeline: ${test_pipeline}
- 
+

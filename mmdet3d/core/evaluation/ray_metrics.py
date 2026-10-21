@@ -5,12 +5,26 @@ import copy
 import numpy as np
 import torch
 from torch.utils.cpp_extension import load
+from pathlib import Path
 from tqdm import tqdm
 from prettytable import PrettyTable
 from .ray_pq import Metric_RayPQ
 
 
-dvr = load("dvr", sources=["lib/dvr/dvr.cpp", "lib/dvr/dvr.cu"], verbose=True, extra_cuda_cflags=['-allow-unsupported-compiler'])
+# 原来导入评估模块就触发编译检查；测速和参数统计并不调用 Ray 评估。
+# dvr = load("dvr", sources=["lib/dvr/dvr.cpp", "lib/dvr/dvr.cu"], verbose=True, extra_cuda_cflags=['-allow-unsupported-compiler'])
+dvr = None
+
+
+def get_dvr():
+    # * 真正使用射线渲染时才加载扩展，同一进程内复用已加载模块。
+    global dvr
+    if dvr is None:
+        # 使用本仓库绝对路径，不再依赖启动命令所在目录。
+        source_dir = Path(__file__).resolve().parents[3] / "lib" / "dvr"
+        dvr = load("dvr", sources=[str(source_dir / "dvr.cpp"), str(source_dir / "dvr.cu")],
+                   verbose=True, extra_cuda_cflags=['-allow-unsupported-compiler'])
+    return dvr
 _pc_range = [-40, -40, -1.0, 40, 40, 5.4]
 _voxel_size = 0.4
 
@@ -107,7 +121,9 @@ def process_one_sample(sem_pred, lidar_rays, output_origin, instance_pred=None):
         output_tindex_render = lidar_tindex  # [1, N], all zeros
 
         with torch.no_grad():
-            pred_dist, _, coord_index = dvr.render_forward(
+            # 仅 Ray 评估运行到这里时，才按需加载 CUDA 扩展。
+            # pred_dist, _, coord_index = dvr.render_forward(
+            pred_dist, _, coord_index = get_dvr().render_forward(
                 occ_pred.cuda(),
                 output_origin_render.cuda(),
                 output_points_render.cuda(),

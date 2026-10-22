@@ -1,6 +1,5 @@
 """注册时序模块、显式合成配置，并复用原 DAOcc 训练/测试入口。"""
 import argparse
-import importlib.util
 from pathlib import Path
 import runpy
 import sys
@@ -24,16 +23,16 @@ def main():
     parser.add_argument('--checkpoint', help='stream 模式权重；test 权重仍作为位置参数')
     parser.add_argument('--out', help='stream 输出全部预测的 pkl 文件')
     args, remaining = parser.parse_known_args()
-    local_root = Path(__file__).resolve().parents[2]
+    local_root = Path(__file__).resolve().parents[1]
     root = Path(args.daocc_root).resolve() if args.daocc_root else local_root
+    # ! 先确定本项目的模型/数据集包，再选择已编译的底层 mmdet3d。
+    sys.path.insert(0, str(local_root))
+    import models
+    import datasets
     sys.path.insert(0, str(root))
-    # * 模型代码始终来自本目录，底层 mmdet3d 可使用已编译的另一份源码。
-    spec = importlib.util.spec_from_file_location(
-        'temporal_daocc_plugin', Path(__file__).with_name('__init__.py'),
-        submodule_search_locations=[str(Path(__file__).parent)])
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    # 普通 import 即可完成注册，不再按路径动态执行包文件。
+    from models.TemporalDAOcc.model import TemporalDAOcc
+    from datasets.temporal_daocc import TemporalNuScenesDataset
 
     import yaml
     from torchpack.utils.config import Config
@@ -74,6 +73,11 @@ def stream(config, args):
     cfg = mmcv.Config(recursive_eval(config))
     data_cfg = cfg.data.val.copy()
     data_cfg.update(temporal_mode='stream', test_mode=True)
+    if cfg.model.get('temporal', {}).get('mode', 'ema') == 'ema':
+        #* （temporal) EMA 沿实际遍历顺序递归更新，只使用上一时刻记忆。
+        # （temporal) 配置中的多历史偏移留给成对加载/可视化，不用于流式缓存选择。
+        data_cfg.multi_adj_frame_id_cfg = [1, 2, 1]
+        print('EMA 流式推理：按场景时间顺序更新单份记忆，不使用成对加载的多历史偏移。')
     dataset = build_dataset(data_cfg)
     model = build_model(cfg.model)
     if cfg.get('fp16') is not None:

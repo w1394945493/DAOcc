@@ -198,6 +198,8 @@ def _fill_trainval_infos(nusc, train_scenes, val_scenes, test=False, max_sweeps=
         info = {
             "lidar_path": lidar_path,
             "token": sample["token"],
+            #* 保存原始场景 token，Ray-IoU 用它将同场景的帧分组并构造射线起点。
+            "scene_token": sample["scene_token"],
             "sweeps": [],
             "cams": dict(),
             "lidar2ego_translation": cs_record["translation"],

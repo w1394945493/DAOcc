@@ -25,8 +25,14 @@ def attach_occ3d_annotations(root_path, version, out_dir, info_prefix, occ3d_roo
         scenes = {scene["token"]: scene["name"] for scene in json.load(f)}
     #* sample.json 将样本 token 关联到所属场景，避免将不同场景的标注配错。
     with open(osp.join(root_path, version, "sample.json")) as f:
+        #* 同时保留原始场景 token，关联 Occ3D 时也可补齐旧版 info 的场景字段。
+        samples = json.load(f)
+        sample_scene_tokens = {sample["token"]: sample["scene_token"] for sample in samples}
+        # sample_scenes = {
+        #     sample["token"]: scenes[sample["scene_token"]] for sample in json.load(f)
+        # }
         sample_scenes = {
-            sample["token"]: scenes[sample["scene_token"]] for sample in json.load(f)
+            sample["token"]: scenes[sample["scene_token"]] for sample in samples
         }
 
     #* 暂存两个划分的修改；路径检查完成前不写回文件。
@@ -40,6 +46,8 @@ def attach_occ3d_annotations(root_path, version, out_dir, info_prefix, occ3d_roo
             #* info 中的样本必须属于当前 nuScenes 版本，否则立即提示数据不匹配。
             if token not in sample_scenes:
                 raise ValueError(f"Unknown sample token in {info_path}: {token}")
+            #* Ray-IoU 需要顶层 scene_token；不能用 occ_path 或样本 token 代替。
+            info["scene_token"] = sample_scene_tokens[token]
             #* 标注布局为 gts/场景名/样本 token/labels.npz；这里只验证文件存在性。
             occ_path = osp.join(occ3d_root, sample_scenes[token], token)
             label_path = osp.join(occ_path, "labels.npz")

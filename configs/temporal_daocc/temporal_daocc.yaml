@@ -1,0 +1,26 @@
+# * 显式继承完整单帧配置，避免依赖新目录祖先的 default.yaml。
+base_config: ../nuscenes/occ3d/daocc_occ3d_nus_w_mask_custom.yaml
+
+dataset_type: TemporalNuScenesDataset
+model:
+  type: TemporalDAOcc
+  temporal:
+    channels: 512
+    # off：单帧对照；fixed：固定权重；gate：可训练空间门控。
+    mode: gate
+    alpha: 0.5
+    # 原始 decoder BEV 范围，不是最终 occupancy 的 [-40,40] 范围。
+    bounds: [-54.0, -54.0, 54.0, 54.0]
+    max_time_gap: 1.0
+
+data:
+  train:
+    dataset:
+      temporal_mode: pair
+      max_time_gap: 1.0
+  val:
+    temporal_mode: pair
+    max_time_gap: 1.0
+  test:
+    temporal_mode: pair
+    max_time_gap: 1.0

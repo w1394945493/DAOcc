@@ -115,6 +115,9 @@ class CustomResNet(BaseModule):  # TODO: [yz] check param init
             block_type='Basic',
     ):
         super(CustomResNet, self).__init__()
+        #* BEV Decoder的残差骨干，不是相机分支的ResNet-50。
+        # 当前DAOcc配置：输入512通道，三个阶段输出128/256/512通道，步长1/1/2。
+        # 默认num_layer=[2,2,2]，每阶段两个BasicBlock；这些数值由配置决定。
         # build backbone
         assert len(num_layer) == len(stride)
         num_channels = [numC_input*2**(i+1) for i in range(len(num_layer))] \
@@ -134,6 +137,8 @@ class CustomResNet(BaseModule):  # TODO: [yz] check param init
                 layer.extend([Bottleneck(inplanes=curr_numC, planes=num_channels[i]//4, stride=1,
                                          downsample=None, norm_cfg=norm_cfg) for _ in range(num_layer[i] - 1)])
                 layers.append(nn.Sequential(*layer))
+        # 当前配置默认进入Basic分支；捷径卷积用于匹配通道和空间尺寸。
+        # 名称downsample不代表每阶段都减小空间尺寸：stride=1时只匹配通道。
         elif block_type == 'Basic':
             curr_numC = numC_input
             for i in range(len(num_layer)):
@@ -162,15 +167,27 @@ class CustomResNet(BaseModule):  # TODO: [yz] check param init
                 (B, 8*C, Dy/8, Dx/8),
             ]
         """
+        #* =================== 1. 接收融合后的BEV ===================
+        # 上方docstring是通用示意，当前stride=[1,1,2]，并非每阶段都下采样。
+        # 当前实际输入[B,512,180,180]；feats用于保存后续neck需要的各层输出。
         feats = []
         x_tmp = x
+        #* =================== 2. 依次执行三个残差阶段 ===================
+        # lid=0：[B,512,180,180] → [B,128,180,180]
+        # lid=1：[B,128,180,180] → [B,256,180,180]
+        # lid=2：[B,256,180,180] → [B,512,90,90]
         for lid, layer in enumerate(self.layers):
+            # with_cp是梯度检查点：训练时可用重算换显存，不是加载模型权重。
+            # 当前默认关闭，直接执行layer(x_tmp)。
             if self.with_cp:
                 x_tmp = checkpoint.checkpoint(layer, x_tmp)
             else:
                 x_tmp = layer(x_tmp)
+            #* =================== 3. 收集指定阶段的输出 ===================
+            # 默认收集全部三层，返回列表；不是只返回最后的90×90特征。
             if lid in self.backbone_output_ids:
                 feats.append(x_tmp)
+        # 交给FPN_LSS选择浅层与深层特征进行融合。
         return feats
 
 

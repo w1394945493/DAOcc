@@ -251,6 +251,9 @@ class BEVFusion(Base3DFusionModel):
         gt_labels_3d=None,
         **kwargs,
     ):
+        #* =================== 1. 分别提取相机与LiDAR的BEV ===================
+        # 相机经过图像backbone、neck和视角变换；LiDAR经过体素化和稀疏编码。
+        # 当前配置输出相机[B,1280,180,180]、LiDAR[B,256,180,180]。
         features = []
         for sensor in (self.encoders if self.training else list(self.encoders.keys())[::-1]):
             if sensor == "camera":
@@ -272,12 +275,17 @@ class BEVFusion(Base3DFusionModel):
                 feature = self.extract_lidar_features(points)
             else:
                 raise ValueError(f"unsupported sensor: {sensor}")
-            features.append(feature)
+            features.append(feature) # 2:[(1 256 180 180) (1 1280 180 180)]
 
+        # 推理时原实现反向遍历encoder以调整显存使用，这里恢复正常模态顺序。
+        # 这只是改变列表顺序，不是对BEV进行空间翻转。
         if not self.training:
             # avoid OOM
             features = features[::-1]
 
+        #* =================== 2. Fusion：跨模态BEV融合 ===================
+        # ConvFuser：通道拼接1536 → 3×3卷积/BN/ReLU → 512通道。
+        # 未配置fuser时仅允许单模态输入；当前双模态配置会执行融合。
         if self.fuser is not None:
             x = self.fuser(features)
         else:
@@ -286,10 +294,16 @@ class BEVFusion(Base3DFusionModel):
 
         batch_size = x.shape[0]
 
+        #* =================== 3. Decoder：处理共享融合特征 ===================
+        # backbone为CustomResNet，生成三层BEV；neck为FPN_LSS，融合第0与第2层。
+        # 这里是二维残差卷积与上采样，不是Transformer Decoder。
         if self.decoder is not None:
-            x = self.decoder["backbone"](x)
+            x = self.decoder["backbone"](x) # 3:[(1 128 180 180) (1 256 180 180) (1 512 90 90)]
             x = self.decoder["neck"](x)
+            # 当前输出[B,512,180,180]，随后同时服务于检测与占据预测。
 
+        #* =================== 4. 训练分支：各预测头计算监督损失 ===================
+        # model.train()走这里；完整前向检查使用model.eval()，进入下面推理分支。
         if self.training:
             outputs = {}
             for head_type, head in self.heads.items():
@@ -311,10 +325,13 @@ class BEVFusion(Base3DFusionModel):
                         outputs[f"stats/{head_type}/{name}"] = val
             return outputs
         else:
+            #* =================== 5. 推理分支：逐帧整理各任务结果 ===================
+            # 每帧一个字典，检测与占据结果写入同一个outputs[k]。
             outputs = [{} for _ in range(batch_size)]
             for head_type, head in self.heads.items():
                 if head_type == "object":
                     pred_dict = head(x, metas)
+                    # 检测头输出先解码/后处理为三维框，再把框、分数、类别搬到CPU。
                     bboxes = head.get_bboxes(pred_dict, metas)
                     for k, (boxes, scores, labels) in enumerate(bboxes):
                         outputs[k].update(
@@ -335,7 +352,10 @@ class BEVFusion(Base3DFusionModel):
                         )
                 elif head_type == "occ":
                     # TODO: [yz] this is so weird!
-                    occ_pred = head(x, lidar_aug_matrix, lidar2ego, kwargs['occ_aug_matrix'])
+                    occ_pred = head(x, lidar_aug_matrix, lidar2ego, kwargs['occ_aug_matrix']) # x:(1 512 180 180)
+                    #* head实际类型由配置决定：原配置为BEVOCCHead2D，高斯配置为GaussianOccHead。
+                    # 上一句head(...)会执行相应类的forward，主模型不用为高斯另写分支。
+                    # get_occ将[B,X,Y,Z,18]分类输出转换为每个体素的类别，放回CPU。
                     occ_pred = head.get_occ(occ_pred)
                     for k in range(batch_size):
                         outputs[k].update(

@@ -6,10 +6,11 @@ import json
 import mmcv
 from os import path as osp
 
-from data_converter import nuscenes_converter as nuscenes_converter
+#* 转换器改为在生成基础 info 时导入；仅关联已有 pkl 不加载转换器。
+# from data_converter import nuscenes_converter as nuscenes_converter
 #* 当前 DAOcc 配置不使用目标库，保留导入供后续恢复。
 # from data_converter.create_gt_database import create_groundtruth_database
-from data_converter import kitti_converter as kitti
+# from data_converter import kitti_converter as kitti
 
 
 
@@ -70,6 +71,60 @@ def attach_occ3d_annotations(root_path, version, out_dir, info_prefix, occ3d_roo
         print(f"Linked Occ3D labels for {len(data['infos'])} samples: {info_path}")
 
 
+#* =================== 关联 SurroundOcc 标注 ===================
+def attach_surroundocc_annotations(info_dir, out_dir, info_prefix, surroundocc_root,
+                                   output_prefix=None):
+    """保留原 info 内容和顺序，检查两个划分的标注后再保存。"""
+    info_dir = osp.abspath(osp.expanduser(info_dir))
+    out_dir = osp.abspath(osp.expanduser(out_dir))
+    surroundocc_root = osp.abspath(osp.expanduser(surroundocc_root))
+    if not osp.isdir(surroundocc_root):
+        raise FileNotFoundError(f"SurroundOcc samples directory does not exist: {surroundocc_root}")
+    pending, missing = [], []
+    detected_version = None
+    for split in ("train", "val"):
+        filename = f"{info_prefix}_infos_{split}.pkl"
+        data = mmcv.load(osp.join(info_dir, filename))
+        #* 仅关联模式根据 pkl 元数据判断版本，不依赖命令行默认的 --version。
+        version = data.get("metadata", {}).get("version")
+        if not version:
+            raise ValueError(f"Missing metadata.version in {filename}")
+        if detected_version is not None and version != detected_version:
+            raise ValueError("Train/val info versions do not match")
+        detected_version = version
+        #* 输入前缀不变；默认输出标明 surroundocc，mini 标记统一放在其后。
+        # 显式 --output-prefix 仍允许自定义；避免已有 surroundocc/mini 后缀重复。
+        target_prefix = output_prefix or info_prefix
+        if output_prefix is None:
+            if target_prefix.endswith("_mini"):
+                target_prefix = target_prefix[:-5]
+            if not target_prefix.endswith("_surroundocc"):
+                target_prefix += "_surroundocc"
+        if version == "v1.0-mini" and not target_prefix.endswith("_mini"):
+            target_prefix += "_mini"
+        output_filename = f"{target_prefix}_infos_{split}.pkl"
+        for info in data["infos"]:
+            #* 用当前关键帧的完整点云文件名匹配，不用 sweep、遍历序号或近似时间戳。
+            # 示例：xxx.pcd.bin 对应 xxx.pcd.bin.npy；保留 .pcd.bin 后缀。
+            label_path = osp.join(surroundocc_root, osp.basename(info["lidar_path"]) + ".npy")
+            if not osp.isfile(label_path):
+                missing.append(label_path)
+            #* 加载器需要完整 npy 路径；原 occ3d、scene_token、sweeps 等字段全部保留。
+            info.setdefault("surround_occ", {})["occ_path"] = label_path
+        pending.append((osp.join(out_dir, output_filename), data))
+    #* 不静默丢帧；解压未完成时明确报错，且两个输出 pkl 均不写入。
+    if missing:
+        raise FileNotFoundError(
+            f"Missing SurroundOcc labels for {len(missing)} samples. "
+            "Finish extracting the annotations before retrying. First 10 paths:\n"
+            + "\n".join(missing[:10])
+        )
+    mmcv.mkdir_or_exist(out_dir)
+    for path, data in pending:
+        mmcv.dump(data, path)
+        print(f"Linked SurroundOcc labels for {len(data['infos'])} samples: {path}")
+
+
 def nuscenes_data_prep(
     root_path,
     info_prefix,
@@ -80,6 +135,8 @@ def nuscenes_data_prep(
     load_augmented=None,
     #* 不传此参数时只生成普通 info；传入时补充 occ3d.occ_path。
     occ3d_root=None,
+    #* 可选的 SurroundOcc samples 目录，可与 Occ3D 同时关联。
+    surroundocc_root=None,
 ):
     """Prepare data related to nuScenes dataset.
 
@@ -94,8 +151,12 @@ def nuscenes_data_prep(
         occ3d_root (str, optional): Root containing scene/sample/labels.npz.
         max_sweeps (int): Number of input consecutive frames. Default: 10
     """
+    #* 从头生成 mini info 时也显式标记版本，后续标注关联沿用同一前缀。
+    if version == "v1.0-mini" and not info_prefix.endswith("_mini"):
+        info_prefix += "_mini"
     if load_augmented is None:
         # otherwise, infos must have been created, we just skip.
+        from data_converter import nuscenes_converter
         nuscenes_converter.create_nuscenes_infos(
             #* 将输出目录传给转换器，确保 info 的生成与读取位置一致。
             root_path, info_prefix, version=version, max_sweeps=max_sweeps,
@@ -119,6 +180,10 @@ def nuscenes_data_prep(
     #* 仅关联训练/验证集的 occupancy 真值，保留普通 info 文件名。
     if occ3d_root is not None:
         attach_occ3d_annotations(root_path, version, out_dir, info_prefix, occ3d_root)
+
+    #* 基础 info 生成后，关联 SurroundOcc；不修改类别或标注数组。
+    if surroundocc_root is not None:
+        attach_surroundocc_annotations(out_dir, out_dir, info_prefix, surroundocc_root)
 
     #* 当前训练 pipeline 未启用 ObjectPaste，无需生成目标 .bin 和 dbinfos；保留原调用。
     # create_groundtruth_database(
@@ -150,6 +215,7 @@ def waymo_data_prep(root_path,
             Here we store pose information of these frames for later use.
     """
     from data_converter import waymo_converter as waymo
+    from data_converter import kitti_converter as kitti
 
     splits = ['training', 'validation', 'testing']
     for i, split in enumerate(splits):
@@ -213,6 +279,16 @@ parser.add_argument(
     default=None,
     help="Occ3D ground-truth root containing scene/sample/labels.npz",
 )
+#* 指向直接存放 *.pcd.bin.npy 的目录，不是其上级目录。
+parser.add_argument("--surroundocc-root", type=str, default=None,
+                    help="SurroundOcc samples directory containing *.pcd.bin.npy")
+#* 传入已有 info 目录即启用仅关联模式：跳过基础数据生成，另存到 --out-dir。
+# 输入使用 --extra-tag；输出可另设 --output-prefix，mini 自动添加 _mini。
+parser.add_argument("--info-dir", type=str, default=None,
+                    help="Reuse existing train/val infos and only attach SurroundOcc labels")
+#* 仅关联模式可单独指定输出前缀；不影响输入文件的查找。
+parser.add_argument("--output-prefix", type=str, default=None,
+                    help="Output prefix for --info-dir mode (mini suffix is added automatically)")
 parser.add_argument("--extra-tag", type=str, default="kitti")
 parser.add_argument("--painted", default=False, action="store_true")
 parser.add_argument("--virtual", default=False, action="store_true")
@@ -222,6 +298,8 @@ parser.add_argument(
 args = parser.parse_args()
 
 if __name__ == "__main__":
+    if args.output_prefix and not args.info_dir:
+        parser.error("--output-prefix requires --info-dir; otherwise use --extra-tag")
     load_augmented = None
     if args.virtual:
         if args.painted:
@@ -229,7 +307,16 @@ if __name__ == "__main__":
         else:
             load_augmented = "pointpainting"
 
-    if args.dataset == "nuscenes" and args.version != "v1.0-mini":
+    #* =================== 复用已有 pkl 的快捷入口 ===================
+    if args.info_dir is not None:
+        if args.dataset != "nuscenes" or not args.surroundocc_root:
+            parser.error("--info-dir requires nuscenes and --surroundocc-root")
+        if args.occ3d_root or args.virtual or args.painted:
+            parser.error("--info-dir only attaches SurroundOcc; existing Occ3D fields are preserved")
+        attach_surroundocc_annotations(
+            args.info_dir, args.out_dir, args.extra_tag, args.surroundocc_root,
+            output_prefix=args.output_prefix)
+    elif args.dataset == "nuscenes" and args.version != "v1.0-mini":
         train_version = f"{args.version}-trainval"
         nuscenes_data_prep(
             root_path=args.root_path,
@@ -241,6 +328,7 @@ if __name__ == "__main__":
             load_augmented=load_augmented,
             #* 透传命令行真值根目录；准备函数仅对 train/val 执行关联。
             occ3d_root=args.occ3d_root,
+            surroundocc_root=args.surroundocc_root,
         )
         test_version = f"{args.version}-test"
         nuscenes_data_prep(
@@ -253,6 +341,7 @@ if __name__ == "__main__":
             load_augmented=load_augmented,
             #* 透传命令行真值根目录；准备函数仅对 train/val 执行关联。
             occ3d_root=args.occ3d_root,
+            surroundocc_root=args.surroundocc_root,
         )
     elif args.dataset == "nuscenes" and args.version == "v1.0-mini":
         train_version = f"{args.version}"
@@ -266,6 +355,7 @@ if __name__ == "__main__":
             load_augmented=load_augmented,
             #* 透传命令行真值根目录；准备函数仅对 train/val 执行关联。
             occ3d_root=args.occ3d_root,
+            surroundocc_root=args.surroundocc_root,
         )
     elif args.dataset == 'waymo':
         waymo_data_prep(

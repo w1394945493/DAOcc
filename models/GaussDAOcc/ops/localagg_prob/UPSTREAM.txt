@@ -1,0 +1,14 @@
+来源：/home/wys/wangyushen/forks/GaussianFormer/model/head/localagg_prob
+来源仓库HEAD：f32df62af7ae7a82441c67bbaf814b71bbcea157
+复制的是本地工作树源码，HEAD仅用于记录来源，不保证工作树与提交完全相同。
+
+保留所有源文件版权和许可声明。原源码声明引用LICENSE.md，但该模块目录未提供该文件；
+GaussianFormer根目录LICENSE为空，未擅自补写或改变授权条款。
+
+GaussDAOcc适配改动：
+1. local_aggregate_prob/__init__.py：前向、反向增加CUDA设备上下文和同步，
+   适配上游默认流内核；补充协方差打包顺序中文说明。
+2. CUDA公式、半径、排序、类数与梯度实现均保持原始版本。
+
+编译：在本目录执行 python setup.py build_ext --inplace。
+调用：models.GaussDAOcc.aggregation使用包内相对导入，不引用GaussianFormer路径。

@@ -1,0 +1,72 @@
+#* =================== 1. 加载原配置，再按字段合并本文件 ===================
+# 本文件是“原DAOcc配置的增量修改”，不是独立列出全部模型模块的完整配置。
+# 使用DAOcc/scripts/run_gauss_daocc.py启动训练/测试；完整模型检查也复用其load_config()。
+# base_config由上述入口自行解析，不是原tools/train.py或tools/test.py原生支持的继承字段。
+# 路径相对于本YAML所在目录，而不是终端当前工作目录。
+#* 实际加载顺序：原配置的各级default.yaml → 原单帧配置 → 本文件的同名字段覆盖。
+# 字典按层级递归合并：本文件未写的字段保留，不会因为只写heads.occ就删除heads.object。
+base_config: ../nuscenes/occ3d/daocc_occ3d_nus_w_mask_custom.yaml
+
+#* =================== 2. 保留原模型主体，仅替换占据头 ===================
+model:
+  # 整体仍由原BEVFusion类组织前向；这里没有另写一套GaussDAOcc主干网络。
+  # 未覆盖的encoders.camera、encoders.lidar、fuser、decoder全部继承原配置。
+  type: BEVFusion
+  heads:
+    # 原heads.object检测头也会保留；本文件只修改heads.occ。
+    occ:
+      #* 将原type: BEVOCCHead2D覆盖为GaussianOccHead。
+      # 入口先导入models.GaussDAOcc.head完成注册；原BEVFusion里的build_head()
+      # 读取这里的type后，就会创建高斯头，无需修改原BEVFusion前向代码。
+      # 原occ中的in_dim、out_dim、Dz、use_mask、num_classes、loss_occ、
+      # class_balance、coordinate_transform等未在此重写，所以仍使用继承值。
+      #* GaussianOccHead继承BEVOCCHead2D：复用坐标变换和final_conv，
+      # 移除新实例里的旧predicter，改用GaussianPredictor + GaussianAggregation。
+      # 新头仍提供forward/loss/get_occ接口，最终输出格式与原占据头兼容。
+      type: GaussianOccHead
+
+      #* =================== 3. 给新占据头增加高斯专用参数 ===================
+      # gaussian是新增配置字段，由GaussianOccHead解析；原BEVOCCHead2D不接收它。
+      # 数据流程：BEV → 原坐标变换/卷积 → 高斯属性 → CUDA局部聚合 → 体素类别。
+      gaussian:
+        # 高斯中心和查询体素均在Occ3D标签坐标系，单位为米。
+        # 顺序：[xmin,ymin,zmin,xmax,ymax,zmax]，不同于LiDAR输入的±54m范围。
+        #* 修改这里时须同步检查继承的coordinate_transform及数据真值范围，不能只改边界。
+        bounds: [-40., -40., -1., 40., 40., 5.4]
+        # 最终占据输出的[X,Y,Z]体素数；当前三轴体素尺寸均为0.4m。
+        # Z维必须与继承的Dz一致；这不是高斯数量。
+        grid_shape: [200, 200, 16]
+
+        #* 高斯锚点布局：50×50个XY位置，每处4个高度锚点，共10000个高斯。
+        # 预测头先把BEV池化到50×50，再在每处预测4组属性；不是对最终体素逐个预测高斯。
+        # 调整此项可探索高斯数量与计算量的关系；当前值只是初始实验设置。
+        anchor_shape: [50, 50, 4]
+        # 中心=tanh预测偏移×锚点间距×此比例+预设锚点；0.5表示最多偏移半个间距。
+        offset_fraction: 0.5
+
+        # 三个局部轴方向的高斯尺度范围及初始化值，单位为米，不是检测框尺寸。
+        # 尺度越大通常覆盖更多体素，局部聚合的配对数量和开销也可能增加。
+        scale_min: 0.1
+        scale_max: 1.2
+        scale_init: 0.6
+        # true：学习四元数旋转残差；false：保持轴对齐，不预测旋转属性。
+        rotation: true
+        # 局部搜索半径依据“最大尺度×此倍数/体素尺寸”向上取整，限制参与聚合的邻域。
+        scale_multiplier: 3.0
+        # 调用本项目models/GaussDAOcc/ops/localagg_prob内编译的CUDA扩展。
+        # torch_reference只供小网格数值检查，不能用于完整Occ3D数据。
+        backend: cuda
+
+#* =================== 4. 数据配置同样按字段覆盖，沿用原pipeline ===================
+data:
+  # 每张GPU每批样本数；路径、数据增强、验证/测试pipeline均继承原配置。
+  samples_per_gpu: 1
+  # 每张GPU的数据加载进程数；这不是高斯数量，也不是模型计算线程数。
+  workers_per_gpu: 2
+
+#* =================== 5. 区分“继承配置”与“加载权重” ===================
+# 继承上面的YAML只复用网络结构和训练设置，不会自动读取原DAOcc模型权重。
+# 训练时可通过run_gauss_daocc.py的--load_from指定原权重，初始化匹配的共享模块。
+# 旧heads.occ.predicter参数不再使用，新gaussian_predictor参数没有对应旧权重，必须训练。
+# 原优化器、训练轮次、检测辅助损失权重等未在本文件覆盖，继续继承原配置。
+# 不预设load_from，避免强制绑定某一台机器的权重位置。

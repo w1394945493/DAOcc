@@ -88,20 +88,44 @@ class BEVOCCHead2D(BaseModule):
         Returns:
 
         """
+        #* =================== 1. 接收 Decoder BEV，统一空间轴顺序 ===================
+        # img_feats 虽名为图像特征，实际是相机与 LiDAR 融合、经过 Decoder 的 BEV。
+        # 当前配置输入 [B,512,Dx,Dy]，通常 Dx=Dy=180，仍处于 LiDAR 坐标系。
+        # 兼容单元素列表；这里不做多尺度特征融合。
         if isinstance(img_feats, list):
             assert len(img_feats) == 1
             img_feats = img_feats[0]
+        # 交换空间轴为 [B,C,Dy,Dx]，满足二维卷积/grid_sample 的行Y、列X约定。
+        #* transpose 仅改变张量排列，不是 LiDAR → 自车坐标变换。
         img_feats = einops.rearrange(img_feats, 'bs c w h -> bs c h w')
+        #* =================== 2. 将 BEV 对齐到目标占据平面 ===================
+        # CrossCoordinateSample 内先将通道 512→128，再按目标坐标采样。
+        # Occ3D：自车系 ±40m 查询点变换到 LiDAR 系后取特征。
+        # SurroundOcc：LiDAR 系 ±50m 查询点直接取特征，不做自车/LiDAR 转换。
+        # 两者当前都输出 [B,128,200,200]，但空间范围、坐标系不同。
         if self.coordinate_transform is not None:
             img_feats = self.coordinate_transform(img_feats, lidar_aug_matrix, lidar2ego, occ_aug_matrix)
+        #* =================== 3. 二维卷积提取局部特征 ===================
+        # final_conv 使用3×3卷积整合邻域，当前配置保留128通道及200×200大小。
+        # permute 将通道放到最后，使后续 Linear 对每个 XY 位置的通道向量运算。
         # (B, C, Dy, Dx) --> (B, C, Dy, Dx) --> (B, Dx, Dy, C)
         occ_pred = self.final_conv(img_feats).permute(0, 3, 2, 1)
         bs, Dx, Dy = occ_pred.shape[:3]
+        #* =================== 4. 每个平面位置预测整根高度柱 ===================
+        # 两套配置均启用 predicter：Linear(128→256) + Softplus + Linear(256→Dz×类别数)。
+        # 所有 XY 位置共享同一个 MLP，每个位置输出16层各类别的分数。
+        # Occ3D：16×18=288；SurroundOcc：16×17=272。
         if self.use_predicter:
             # (B, Dx, Dy, C) --> (B, Dx, Dy, 2*C) --> (B, Dx, Dy, Dz*n_cls)
             occ_pred = self.predicter(occ_pred)
+            # Channel-to-Height：把最后一维拆为“高度层×类别”，不执行稠密3D卷积。
             occ_pred = occ_pred.view(bs, Dx, Dy, self.Dz, self.num_classes)
 
+        #* =================== 5. 返回类别分数，后续计算损失或取预测类别 ===================
+        # 当前配置返回 [B,200,200,16,K] logits，尚未 softmax/argmax，不是类别编号。
+        # loss() 用它与真值计算损失；推理时 get_occ() 转为每个体素的类别。
+        # use_mask 只影响监督损失，不在这里把不可见位置的预测清空。
+        # 若关闭 use_predicter，原实现直接返回上面的4维结果，不经过高度 reshape。
         return occ_pred
 
     def loss(self, occ_pred, voxel_semantics, mask_camera):

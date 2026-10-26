@@ -41,7 +41,7 @@ def pcolor(string, color, on_color=None, attrs=None):
 
 
 def getCellCoordinates(points, voxelSize):
-    return (points / voxelSize).astype(np.int)
+    return (points / voxelSize).astype(int)
 
 
 def getNumUniqueCells(cells):
@@ -138,7 +138,7 @@ class Metric_mIoU():
         if mask_camera is not None: mask_camera = mask_camera.astype(bool)
         semantics_gt[semantics_gt==self.FREE_LABEL] = self.num_classes - 1
         semantics_pred[semantics_pred==self.FREE_LABEL] = self.num_classes - 1
-        mask = np.ones_like(semantics_gt, dtype=np.bool)
+        mask = np.ones_like(semantics_gt, dtype=np.bool_)
         if self.use_infov_mask:
             mask = np.logical_and(mask, mask_infov)                  
         if self.use_lidar_mask:

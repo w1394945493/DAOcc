@@ -243,7 +243,7 @@ def _draw_bboxes_ind(bbox3d,
 
         # change the color of points which are in box
         if pcd is not None and mode == 'xyz':
-            points_colors[indices[:, i].astype(np.bool)] = in_box_color
+            points_colors[indices[:, i].astype(np.bool_)] = in_box_color
 
     # update points colors
     if pcd is not None:

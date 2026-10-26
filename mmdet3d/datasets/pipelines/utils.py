@@ -2,7 +2,8 @@ import warnings
 
 import numba
 import numpy as np
-from numba import errors
+# 使用新版 Numba 的正式模块路径，避免依赖旧顶层别名。
+from numba.core import errors
 
 from mmdet3d.core.bbox import box_np_ops
 

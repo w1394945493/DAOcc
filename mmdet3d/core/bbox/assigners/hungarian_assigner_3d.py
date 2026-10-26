@@ -11,7 +11,10 @@ except ImportError:
     linear_sum_assignment = None
 
 
-@BBOX_ASSIGNERS.register_module()
+# Original: @BBOX_ASSIGNERS.register_module()
+# Keep the normalized-box variant separate from the TransFusion assigner
+# registered as HungarianAssigner3D in hungarian_assigner.py.
+@BBOX_ASSIGNERS.register_module(name="HungarianAssigner3DNormalized")
 class HungarianAssigner3D(BaseAssigner):
     """Computes one-to-one matching between predictions and ground truth.
     This class computes an assignment between the targets and the predictions

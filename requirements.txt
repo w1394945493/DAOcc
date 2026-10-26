@@ -1,17 +1,38 @@
-# mmcv-full 安装需要指定额外的索引链接
-mmcv-full==1.4.0 --find-links https://download.openmmlab.com/mmcv/dist/cu113/torch1.10.0/index.html
-
-# 其他常规依赖
-mmdet==2.20.0
+# CUDA 12.1 migration candidate; not yet validated end-to-end.
+# Python 3.8; install torch==2.1.2 / torchvision==0.16.2 from the cu121
+# index FIRST, then build mmcv-full==1.7.2 separately (see docs/install.md).
+# Keep the MMCV pin here so subsequent installs cannot silently change it.
+mmcv-full==1.7.2
+mmdet==2.28.2
 nuscenes-devkit==1.1.11
 torchpack==0.3.1
-numba==0.48.0
-numpy==1.22.0
+numba==0.58.1
+# Keep legacy np.bool / np.int working during the initial migration.
+numpy==1.23.5
 prettytable==3.11.0
 ninja==1.11.1.1
 einops==0.8.0
 yapf==0.40.0
 pillow==8.4.0
-mpi4py==3.0.3
 Shapely==1.7.1
+# MPI: no direct pin until the chosen entry point / torchpack dependencies
+# are checked. Transitive dependencies may still install mpi4py.
 
+# Original CUDA 11.3 / PyTorch 1.10 requirements (preserved for reference):
+# # mmcv-full 安装需要指定额外的索引链接
+# mmcv-full==1.4.0 --find-links https://download.openmmlab.com/mmcv/dist/cu113/torch1.10.0/index.html
+#
+# # 其他常规依赖
+# mmdet==2.20.0
+# nuscenes-devkit==1.1.11
+# torchpack==0.3.1
+# numba==0.48.0
+# numpy==1.22.0
+# prettytable==3.11.0
+# ninja==1.11.1.1
+# einops==0.8.0
+# yapf==0.40.0
+# pillow==8.4.0
+# mpi4py==3.0.3
+# Shapely==1.7.1
+#

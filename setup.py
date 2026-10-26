@@ -73,7 +73,9 @@ if __name__ == "__main__":
                     "src/maxpool.cc",
                     "src/maxpool_cuda.cu",
                 ],
-                extra_args=["-w", "-std=c++14"],
+                # Original PyTorch 1.10 setting: extra_args=["-w", "-std=c++14"],
+                # PyTorch 2.1 requires C++17 for both C++ and CUDA sources.
+                extra_args=["-w", "-std=c++17"],
             ),
             make_cuda_ext(
                 name="bev_pool_ext",

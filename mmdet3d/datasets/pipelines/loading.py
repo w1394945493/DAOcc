@@ -373,7 +373,7 @@ class LoadBEVSegmentation:
         )
         # masks = masks[:, ::-1, :].copy()
         masks = masks.transpose(0, 2, 1)
-        masks = masks.astype(np.bool)
+        masks = masks.astype(np.bool_)
 
         num_classes = len(self.classes)
         labels = np.zeros((num_classes, *self.canvas_size), dtype=np.long)

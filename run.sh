@@ -225,3 +225,153 @@ python -m pip check
 python tools/test.py --help
 # 后续运行时请使用当前 CUDA-DAOcc/DAOcc 目录，上半部分部分旧命令指向 forks/DAOcc。
 # 推荐将 CUDA 12.1 的预测结果写入 data/Outputs/daocc_cu121，便于与旧环境比较。
+
+#*========================================================*
+#* 导入服务器
+#* 打包daocc-cu121环境
+/home/wys/miniforge3/bin/conda-pack -n daocc-cu121 \
+  -o /home/wys/wangyushen/docker/daocc-cu121.tar.gz \
+  --ignore-editable-packages
+
+#* 解压
+mkdir -p /public/home/xiess261023/envs/daocc-cu121
+tar -xzf /public/home/xiess261023/envs/daocc-cu121.tar.gz \
+  -C /public/home/xiess261023/envs/daocc-cu121
+
+# 当前终端激活
+source /public/home/xiess261023/envs/daocc-cu121/bin/activate
+#自动激活
+echo 'source /public/home/xiess261023/envs/daocc-cu121/bin/activate' >> ~/.bashrc
+source ~/.bashrc
+
+cd /public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc
+python -m pip install --no-build-isolation --no-deps -e .
+
+# MMCV需要重新编译
+PIP_CONFIG_FILE=/dev/null PIP_EXTRA_INDEX_URL= \
+python -m pip --disable-pip-version-check download mmcv-full==1.7.2 \
+  --no-deps --no-binary=mmcv-full --no-build-isolation \
+  --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+  -d /home/wys/wangyushen/data/download
+
+# *------------------------------------------------#
+# * 编译MMCV，以同时支持 A800、RTX 3090、RTX 4090：
+MMCV_WITH_OPS=1 FORCE_CUDA=1 \
+TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9" MAX_JOBS=2 \
+python -m pip --disable-pip-version-check install -v \
+  --no-index --no-deps --no-build-isolation --no-cache-dir \
+  --force-reinstall \
+  /public/home/xiess261023/wangyushen/Data/download/mmcv-full-1.7.2.tar.gz
+
+
+# *--------------------------------------------------#
+# * 编译pytorch-auantization，以同时支持 A800、A6000、RTX 3090、RTX 4090：
+cd /public/home/xiess261023/wangyushen/forks/TensorRT-quantization-src/tools/pytorch-quantization
+
+rm -rf build
+
+TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9" MAX_JOBS=2 \
+python -m pip --disable-pip-version-check install -v \
+  --no-index --no-deps --no-build-isolation --no-cache-dir \
+  --force-reinstall .
+
+
+# *----------------------------------------------------#
+# * 服务器离线依赖整理（Ubuntu 22.04 / x86_64）
+# 以下分为“本地联网机器”和“离线服务器”两部分，请分别执行，不要整段运行。
+# conda-pack 不包含系统动态库，所以迁移后仍需补充 OpenCV/VTK 和 C++ 构建依赖。
+# 本地路径是 data/download，服务器路径是 Data/download，注意大小写。
+
+# 1. 【本地联网机器】一次下载目前已确认缺少的 APT 包。
+# 要求下载机器/软件源同为 Ubuntu 22.04 jammy，不能混用其他 Ubuntu 版本。
+# 运行/图形依赖：
+#   libxrender1     -> libXrender.so.1，供 VTK/Mayavi 导入使用。
+#   libglib2.0-0    -> libgthread-2.0.so.0 等，供 OpenCV 导入使用。
+mkdir -p /home/wys/wangyushen/data/download/offline-libs
+cd /home/wys/wangyushen/data/download/offline-libs
+apt download libxrender1:amd64 libglib2.0-0:amd64
+
+# 构建工具及本次排错中补齐的库：
+#   cmake + cmake-data：CMake 程序和模块，必须配套下载。
+#   protobuf-compiler：protoc，用于从 ONNX .proto 生成 C++ 文件。
+#   libprotobuf-dev / libprotobuf23 / libprotoc23：Protobuf 头文件和链接库。
+#   libarchive13：libarchive.so.13；libcurl4：libcurl.so.4。
+#   libjsoncpp25：libjsoncpp.so.25；libuv1：libuv.so.1；librhash0：librhash.so.0。
+mkdir -p /home/wys/wangyushen/data/download/offline-build
+cd /home/wys/wangyushen/data/download/offline-build
+apt download cmake:amd64 cmake-data \
+  protobuf-compiler:amd64 libprotobuf-dev:amd64 libprotobuf23:amd64 libprotoc23:amd64 \
+  libarchive13:amd64 libcurl4:amd64 libjsoncpp25:amd64 libuv1:amd64 librhash0:amd64
+
+# apt download 不自动下载递归依赖；以上是本服务器已确认需要的清单，
+# 其他机器仍可能缺包，后面用 ldd 汇总检查后再补充。
+# 将两个文件夹分别上传到服务器：
+# /public/home/xiess261023/wangyushen/Data/download/offline-libs/
+# /public/home/xiess261023/wangyushen/Data/download/offline-build/
+
+# 2. 【离线服务器】无 sudo 时，统一解压到用户目录。
+# dpkg-deb -x 只解压，不注册系统软件包、不运行安装脚本、不自动补依赖。
+# 工具会位于 local/usr/bin，库位于 local/usr/lib/x86_64-linux-gnu。
+mkdir -p /public/home/xiess261023/wangyushen/local
+for pkg in \
+  /public/home/xiess261023/wangyushen/Data/download/offline-libs/*.deb \
+  /public/home/xiess261023/wangyushen/Data/download/offline-build/*.deb; do
+  [ -f "$pkg" ] || continue
+  dpkg-deb -x "$pkg" /public/home/xiess261023/wangyushen/local || break
+done
+
+# 3. 【离线服务器】配置当前终端。
+# PATH 查找 cmake/protoc；LD_LIBRARY_PATH 查找运行时 .so；
+# CMAKE_PREFIX_PATH 让 CMake 找到用户目录中的 Protobuf 头文件和库。
+export PATH="/public/home/xiess261023/wangyushen/local/usr/bin:$PATH"
+export LD_LIBRARY_PATH="/public/home/xiess261023/wangyushen/local/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export CMAKE_PREFIX_PATH="/public/home/xiess261023/wangyushen/local/usr${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+hash -r
+
+# 4. 【离线服务器，可选】每次打开 Bash 自动配置。
+# 已在 ~/.bashrc 添加过上述三条 export 时跳过本段，不要重复追加。
+# 独立标记可避免重复执行本段时再次写入；不会识别此前无标记的手动配置。
+if ! grep -qF '# DAOcc offline dependencies' ~/.bashrc; then
+  cat >> ~/.bashrc <<'OFFLINE_ENV'
+
+# DAOcc offline dependencies
+export PATH="/public/home/xiess261023/wangyushen/local/usr/bin:$PATH"
+export LD_LIBRARY_PATH="/public/home/xiess261023/wangyushen/local/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export CMAKE_PREFIX_PATH="/public/home/xiess261023/wangyushen/local/usr${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+OFFLINE_ENV
+fi
+# 新终端自动生效；本终端已经由第 3 步完成设置。
+
+# 5. 【离线服务器】验证工具和运行库。
+which cmake
+which protoc
+ldd "$(command -v cmake)" | grep 'not found'
+ldd "$(command -v protoc)" | grep 'not found'
+# 上面 grep 无输出是正常结果（退出码为 1），表示未发现缺失的直接/传递动态依赖。
+# 若还有缺库，把全部 not found 项一起记录，在本地下载对应包，再上传解压。
+cmake --version
+protoc --version
+# 本次已验证输出：cmake 3.22.1；libprotoc 3.12.4。
+python -c "import cv2; import vtk; print('OpenCV / VTK 导入通过')"
+# 导入成功不代表无显示器服务器已经能打开 Mayavi 窗口。
+
+# 6. 【离线服务器】修正生成 ONNX Protobuf 代码时写死的 protoc 路径。
+cd /public/home/xiess261023/wangyushen/forks/CUDA-DAOcc
+# src/onnx/make_pb.sh 原来是 protoc=/usr/bin/protoc；
+# 改为从 PATH 查找，才能使用 local/usr/bin/protoc。首次修改时备份原文件。
+if grep -q '^protoc=/usr/bin/protoc$' src/onnx/make_pb.sh; then
+  cp -n src/onnx/make_pb.sh src/onnx/make_pb.sh.before-offline
+  sed -i 's|^protoc=/usr/bin/protoc$|protoc=$(command -v protoc)|' src/onnx/make_pb.sh
+fi
+# tool/run.sh 会自动调用 make_pb.sh，无需手工重复生成。
+# 若 build/ 是从原机器复制来的，应先改名备份，再让 CMake 在本机重新配置。
+# 不要删除 .proto 源文件；生成代码必须与当前 Protobuf 头文件/库匹配。
+
+# 7. 【离线服务器】依赖补齐后重新构建运行（按实际数据位置修改后执行）。
+# 确认 tool/environment.sh 已使用服务器上的 TensorRT、CUDA、cuDNN/驱动路径。
+# --model-dir 放 ONNX 和目标 GPU 上构建的 engine；--data-dir 放图片、点云等输入。
+# 仅当模型目录确实包含这些输入数据时，两者才能指向同一目录。
+# bash tool/run.sh \
+#   --model-dir /public/home/xiess261023/wangyushen/Data/Outputs/daocc/weights/occ3d_nus_w_mask/tensorrt-int8 \
+#   --data-dir /实际推理输入数据目录 \
+#   --precision int8

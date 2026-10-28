@@ -147,7 +147,7 @@ def get_available_scenes(nusc):
         has_more_frames = True
         scene_not_exist = False
         while has_more_frames:
-            lidar_path, boxes, _ = nusc.get_sample_data(sd_rec["token"])
+            lidar_path = nusc.get_sample_data_path(sd_rec["token"])
             lidar_path = str(lidar_path)
             if os.getcwd() in lidar_path:
                 # path from lyftdataset is absolute path
@@ -216,6 +216,10 @@ def _fill_trainval_infos(nusc, train_scenes, val_scenes, test=False, max_sweeps=
         e2g_t = info["ego2global_translation"]
         l2e_r_mat = Quaternion(l2e_r).rotation_matrix
         e2g_r_mat = Quaternion(e2g_r).rotation_matrix
+        # Reuse the keyframe transforms across all cameras, sweeps and boxes.
+        e2g_inv_t = np.linalg.inv(e2g_r_mat).T
+        l2e_inv_t = np.linalg.inv(l2e_r_mat).T
+        global2lidar = e2g_inv_t @ l2e_inv_t
 
         # obtain 6 image's information per frame
         camera_types = [
@@ -228,9 +232,14 @@ def _fill_trainval_infos(nusc, train_scenes, val_scenes, test=False, max_sweeps=
         ]
         for cam in camera_types:
             cam_token = sample["data"][cam]
-            cam_path, _, camera_intrinsics = nusc.get_sample_data(cam_token)
+            # Only intrinsics are needed: get_sample_data also transforms and
+            # visibility-tests every annotation, whose boxes we would discard.
+            cam_sd = nusc.get("sample_data", cam_token)
+            cam_cs = nusc.get("calibrated_sensor", cam_sd["calibrated_sensor_token"])
+            camera_intrinsics = np.array(cam_cs["camera_intrinsic"])
             cam_info = obtain_sensor2top(
-                nusc, cam_token, l2e_t, l2e_r_mat, e2g_t, e2g_r_mat, cam
+                nusc, cam_token, l2e_t, l2e_r_mat, e2g_t, e2g_r_mat, cam,
+                global2lidar=global2lidar, ego2lidar=l2e_inv_t,
             )
             cam_info.update(camera_intrinsics=camera_intrinsics)
             info["cams"].update({cam: cam_info})
@@ -241,7 +250,8 @@ def _fill_trainval_infos(nusc, train_scenes, val_scenes, test=False, max_sweeps=
         while len(sweeps) < max_sweeps:
             if not sd_rec["prev"] == "":
                 sweep = obtain_sensor2top(
-                    nusc, sd_rec["prev"], l2e_t, l2e_r_mat, e2g_t, e2g_r_mat, "lidar"
+                    nusc, sd_rec["prev"], l2e_t, l2e_r_mat, e2g_t, e2g_r_mat, "lidar",
+                    global2lidar=global2lidar, ego2lidar=l2e_inv_t,
                 )
                 sweeps.append(sweep)
                 sd_rec = nusc.get("sample_data", sd_rec["prev"])
@@ -271,7 +281,7 @@ def _fill_trainval_infos(nusc, train_scenes, val_scenes, test=False, max_sweeps=
             # convert velo from global to lidar
             for i in range(len(boxes)):
                 velo = np.array([*velocity[i], 0.0])
-                velo = velo @ np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T
+                velo = velo @ e2g_inv_t @ l2e_inv_t
                 velocity[i] = velo[:2]
 
             names = [b.name for b in boxes]
@@ -300,7 +310,8 @@ def _fill_trainval_infos(nusc, train_scenes, val_scenes, test=False, max_sweeps=
 
 
 def obtain_sensor2top(
-    nusc, sensor_token, l2e_t, l2e_r_mat, e2g_t, e2g_r_mat, sensor_type="lidar"
+    nusc, sensor_token, l2e_t, l2e_r_mat, e2g_t, e2g_r_mat, sensor_type="lidar",
+    global2lidar=None, ego2lidar=None,
 ):
     """Obtain the info with RT matric from general sensor to Top LiDAR.
 
@@ -315,6 +326,9 @@ def obtain_sensor2top(
         e2g_r_mat (np.ndarray): Rotation matrix from ego to global
             in shape (3, 3).
         sensor_type (str): Sensor to calibrate. Default: 'lidar'.
+
+        global2lidar (np.ndarray, optional): Cached global-to-lidar row rotation.
+        ego2lidar (np.ndarray, optional): Cached ego-to-lidar row rotation.
 
     Returns:
         sweep (dict): Sweep information after transformation.
@@ -344,16 +358,14 @@ def obtain_sensor2top(
     # sweep->ego->global->ego'->lidar
     l2e_r_s_mat = Quaternion(l2e_r_s).rotation_matrix
     e2g_r_s_mat = Quaternion(e2g_r_s).rotation_matrix
-    R = (l2e_r_s_mat.T @ e2g_r_s_mat.T) @ (
-        np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T
-    )
-    T = (l2e_t_s @ e2g_r_s_mat.T + e2g_t_s) @ (
-        np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T
-    )
-    T -= (
-        e2g_t @ (np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T)
-        + l2e_t @ np.linalg.inv(l2e_r_mat).T
-    )
+    # Optional caches preserve compatibility with callers outside this converter.
+    if ego2lidar is None:
+        ego2lidar = np.linalg.inv(l2e_r_mat).T
+    if global2lidar is None:
+        global2lidar = np.linalg.inv(e2g_r_mat).T @ ego2lidar
+    R = (l2e_r_s_mat.T @ e2g_r_s_mat.T) @ global2lidar
+    T = (l2e_t_s @ e2g_r_s_mat.T + e2g_t_s) @ global2lidar
+    T -= e2g_t @ global2lidar + l2e_t @ ego2lidar
     sweep["sensor2lidar_rotation"] = R.T  # points @ R.T + T
     sweep["sensor2lidar_translation"] = T
     return sweep

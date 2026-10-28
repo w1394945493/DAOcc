@@ -11,7 +11,7 @@ python -m pip install \
   --no-build-isolation --no-cache-dir \
   "mayavi==4.8.2" "vtk==9.2.6" "numpy==1.22.0"
 
-
+# * 生成数据集pkl文件
 python tools/create_data.py \
   nuscenes \
   --root-path /home/wys/wangyushen/data/Datasets/nuscenes/v1.0-mini \
@@ -19,6 +19,15 @@ python tools/create_data.py \
   --out-dir /home/wys/wangyushen/data/Datasets/nuscenes/anns/daocc \
   --extra-tag nuscenes \
   --occ3d-root /home/wys/wangyushen/data/Datasets/nuscenes/gts
+#* ----------------------------------------
+# * ININ-3090 NuScenes
+python tools/create_data.py \
+  nuscenes \
+  --root-path /home/wangyushen/Data/Datasets/Nuscenes \
+  --version v1.0 \
+  --out-dir /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc \
+  --extra-tag nuscenes \
+  --occ3d-root /home/wangyushen/Data/Datasets/nuscenes_anns/gts
 
 #* 评估-可视化
 #*================================================================================#
@@ -28,6 +37,14 @@ python tools/test.py \
   configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_custom.yaml \
   /home/wys/wangyushen/data/Weights/daocc/occ3d_nus_w_mask/epoch_6.pth \
   --out-dir /home/wys/wangyushen/data/Outputs/daocc/results/w_mask/predictions \
+
+#* inin-3090
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+python tools/test.py \
+  /home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin.yaml \
+  /home/wangyushen/Data/Weights/daocc/occ3d_nus_w_mask/epoch_6.pth \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/results/w_mask/predictions \
+
 
 # * 可视化：直接可视化此前的预测结果
 cd /home/wys/wangyushen/forks/DAOcc
@@ -41,7 +58,18 @@ python tools/visualize.py \
   --bbox-thickness 2 \
   --data.workers_per_gpu 2
 
+#* ----------------------------------------
+# * ININ-3090 NuScenes
 cd /home/wys/wangyushen/forks/DAOcc
+python tools/visualize.py \
+  /home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin.yaml \
+  --mode pred \
+  --split val \
+  --pred-dir /home/wangyushen/Data/Outputs/daocc/results/w_mask/predictions \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/results/w_mask/visualizations \
+  --bbox-thickness 2 \
+  --data.workers_per_gpu 2
+
 
 python tools/vis_occ3d.py \
   /home/wys/wangyushen/data/Outputs/daocc/results/w_mask/visualizations/scene-0103/occ/1533151603547590-3e8750f331d7499e9b5123e9eb70f2e2.npy
@@ -77,6 +105,142 @@ python tools/vis_occ3d.py \
 
 python tools/vis_occ3d.py \
   /home/wys/wangyushen/data/Outputs/daocc_cu121/results/wo_mask/visualizations/scene-0103/occ/1533151603547590-3e8750f331d7499e9b5123e9eb70f2e2_gt.npy
+
+
+
+
+#* ===================================================#
+#* 单卡训练
+cd /public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+DATA=/public/home/xiess261023/wangyushen/Data
+CONFIG=configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_local.yaml
+PRETRAIN="$DATA/Weights/pretrained/resnet50-0676ba61.pth"
+
+# | 参数 | 含义 |
+# | :--- | :--- |
+# | `--log_config.interval 20` | 每 20 个训练 iteration 输出一次日志 |
+# | `--checkpoint_config.interval 1` | 每 1 个 epoch 保存普通权重 |
+# | `--max_keep_ckpt 3` | 普通权重、EMA 权重各保留最近 3 份 |
+CUDA_VISIBLE_DEVICES=0 \
+python tools/train.py "$CONFIG" \
+  --run-dir "$DATA/Outputs/daocc/w_mask/train2" \
+  --model.encoders.camera.backbone.init_cfg.checkpoint "$PRETRAIN" \
+  --data.samples_per_gpu 16 \
+  --data.workers_per_gpu 4 \
+  --max_epochs 6 \
+  --log_config.interval 20 \
+  --checkpoint_config.interval 1 \
+  --evaluation.interval 1 \
+  --max_keep_ckpt 1
+
+# ===================================================#
+# 多卡训练
+# 修改/public/home/xiess261023/envs/daocc-cu121/lib/python3.8/site-packages/mmcv/parallel/distributed.py
+#* inin 3090
+# /home/wangyushen/miniforge3/envs/daocc-cu121/lib/python3.8/site-packages/mmcv/parallel/distributed.py
+# 将        module_to_run = self._replicated_tensor_module if \
+            # self._use_replicated_tensor_module else self.module
+# 替换为           # 兼容新版 PyTorch：该私有属性不存在时使用正常的模型模块。
+# module_to_run = (
+#     self._replicated_tensor_module
+#     if getattr(self, "_use_replicated_tensor_module", False)
+#     else self.module
+# )
+
+
+# BIT-服务器
+cd /public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+DATA=/public/home/xiess261023/wangyushen/Data
+CONFIG=configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_local.yaml
+PRETRAIN="$DATA/Weights/pretrained/resnet50-0676ba61.pth"
+
+# 修改这三个参数即可
+# GPUS=0,1
+# BATCH_SIZE=8       # 每张 GPU 的 batch size
+# WORKERS=4         # 每张 GPU 的数据加载进程数
+GPUS=0,1,2,3
+BATCH_SIZE=4       
+WORKERS=4         
+
+# 根据 GPU 列表自动计算训练进程数
+IFS=',' read -ra GPU_LIST <<< "$GPUS"
+NUM_GPUS=${#GPU_LIST[@]}
+
+CUDA_VISIBLE_DEVICES="$GPUS" PYTHONWARNINGS=ignore \
+python -m torch.distributed.run \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$NUM_GPUS" \
+  tools/dist_train.py "$CONFIG" \
+  --launcher pytorch \
+  --run-dir "$DATA/Outputs/daocc/w_mask/train3" \
+  --model.encoders.camera.backbone.init_cfg.checkpoint "$PRETRAIN" \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$WORKERS" \
+  --max_epochs 6 \
+  --log_config.interval 20 \
+  --checkpoint_config.interval 1 \
+  --evaluation.interval 1 \
+  --max_keep_ckpt 1
+
+
+# ININ 3090
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+DATA=/home/wangyushen/Data
+CONFIG=/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin.yaml
+PRETRAIN="$DATA/Weights/daocc/pretrained/resnet50-0676ba61.pth"
+
+# 修改这三个参数即可
+# GPUS=0,1
+# BATCH_SIZE=8       # 每张 GPU 的 batch size
+# WORKERS=4         # 每张 GPU 的数据加载进程数
+GPUS=4,5,6,7
+BATCH_SIZE=4       
+WORKERS=4 
+FLIENAME=Outputs/daocc/w_mask/train        
+
+# 根据 GPU 列表自动计算训练进程数
+IFS=',' read -ra GPU_LIST <<< "$GPUS"
+NUM_GPUS=${#GPU_LIST[@]}
+
+CUDA_VISIBLE_DEVICES="$GPUS" PYTHONWARNINGS=ignore \
+python -m torch.distributed.run \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$NUM_GPUS" \
+  tools/dist_train.py "$CONFIG" \
+  --launcher pytorch \
+  --run-dir "$DATA/$FLIENAME" \
+  --model.encoders.camera.backbone.init_cfg.checkpoint "$PRETRAIN" \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$WORKERS" \
+  --max_epochs 6 \
+  --log_config.interval 10 \
+  --checkpoint_config.interval 1 \
+  --evaluation.interval 1 \
+  --max_keep_ckpt 1
+
+# *==================================================#
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+GPUS=4,5,6,7 \
+BATCH_SIZE=4 \
+WORKERS=4 \
+MAX_EPOCHS=6 \
+LOG_INTERVA=50 \
+CHECKPOINT_INTERVAL=1 \
+EVAL_INTERVAL=1 \
+MAX_KEEP_CKPT=1 \
+DATA=/home/wangyushen/Data \
+CONFIG=/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin.yaml \
+PRETRAIN=/home/wangyushen/Data/Weights/daocc/pretrained/resnet50-0676ba61.pth \
+RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train \
+PYTHON=python \
+bash scripts/train_occ3d.sh
+
 
 # *======================================================================================================#
 # *(10.26) DAOcc：CUDA 12.1 环境配置与验证
@@ -244,7 +408,11 @@ source /public/home/xiess261023/envs/daocc-cu121/bin/activate
 echo 'source /public/home/xiess261023/envs/daocc-cu121/bin/activate' >> ~/.bashrc
 source ~/.bashrc
 
+# * 重新编译mmdet3d
 cd /public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc
+python -m pip install --no-build-isolation --no-deps -e .
+# inin-3090
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 python -m pip install --no-build-isolation --no-deps -e .
 
 # MMCV需要重新编译
@@ -263,6 +431,14 @@ python -m pip --disable-pip-version-check install -v \
   --force-reinstall \
   /public/home/xiess261023/wangyushen/Data/download/mmcv-full-1.7.2.tar.gz
 
+# inin 3090 服务器上
+MMCV_WITH_OPS=1 FORCE_CUDA=1 \
+TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9" MAX_JOBS=2 \
+python -m pip --disable-pip-version-check install -v \
+  --no-index --no-deps --no-build-isolation --no-cache-dir \
+  --force-reinstall \
+  /home/B_UserData/wangyushen/Data/download/mmcv-full-1.7.2.tar.gz
+  
 
 # *--------------------------------------------------#
 # * 编译pytorch-auantization，以同时支持 A800、A6000、RTX 3090、RTX 4090：

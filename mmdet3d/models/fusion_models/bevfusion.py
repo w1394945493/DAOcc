@@ -86,6 +86,8 @@ class BEVFusion(Base3DFusionModel):
             if heads[name] is not None:
                 self.heads[name] = build_head(heads[name])
 
+        # model.loss_scale 是 object/occ 等任务的损失权重，会改变各任务对总 loss 的贡献。
+        # 它不是顶层 fp16.loss_scale（梯度缩放），不能用来切换 FP16/FP32。
         if "loss_scale" in kwargs:
             self.loss_scale = kwargs["loss_scale"]
         else:
@@ -161,6 +163,8 @@ class BEVFusion(Base3DFusionModel):
 
         return x
 
+    # 混合精度下将传入的半精度浮点张量转回 FP32，体素化保留单精度计算。
+    # no_grad 只控制梯度记录；force_fp32 才是这里的精度控制。
     @torch.no_grad()
     @force_fp32()
     def voxelize(self, points):
@@ -191,6 +195,8 @@ class BEVFusion(Base3DFusionModel):
 
         return feats, coords, sizes
 
+    # 仅在 fp16_enabled 开启时，将 img/points 中的 FP32 张量自动转成 FP16。
+    # 几何变换等敏感子模块可通过 force_fp32 转回 FP32，因此这是混合精度。
     @auto_fp16(apply_to=("img", "points"))
     def forward(
         self,
@@ -232,6 +238,8 @@ class BEVFusion(Base3DFusionModel):
             )
             return outputs
 
+    # 仅在 fp16_enabled 开启时，将 img/points 中的 FP32 张量自动转成 FP16。
+    # 几何变换等敏感子模块可通过 force_fp32 转回 FP32，因此这是混合精度。
     @auto_fp16(apply_to=("img", "points"))
     def forward_single(
         self,
@@ -307,13 +315,145 @@ class BEVFusion(Base3DFusionModel):
         if self.training:
             outputs = {}
             for head_type, head in self.heads.items():
-                if head_type == "object":
+                #*--------------------------------------#
+                #* 3D预测Head
+                if head_type == "object": #* "object"
                     pred_dict = head(x, metas)
-                    losses = head.loss(gt_bboxes_3d, gt_labels_3d, pred_dict)
+                    '''
+                    # 在下一行 losses = head.loss(...) 设置断点（必须在执行 loss 前，此时 pred_dict 已生成）。
+                    # 选择当前 forward_single 栈帧，复制下面完整 exec(...) 到 VSCode 调试控制台。
+                    # 不要复制外层三单引号。只保存 PNG 图片，保存在 out_dir 下的独立时间戳目录。
+                    # 图中坐标为当前训练增强后的 LiDAR 坐标；不是原始相机/世界坐标。
+                    # 这是检测框检查，不是 occ 体素检查；单帧图片不能代替验证集评估。
+                    exec(__import__("textwrap").dedent("""
+                    import os
+                    from pathlib import Path
+                    from datetime import datetime
+                    import numpy as np
+                    import torch
+                    from matplotlib.figure import Figure
+                    from matplotlib.backends.backend_agg import FigureCanvasAgg
+                    from matplotlib.lines import Line2D
+
+                    sample_idx = 0
+                    zoom_radius = 20.0  # 第二张图片显示原点附近 +/-20 m
+                    max_text_labels = 60  # 每幅图最多标注多少个框，预测优先标注高分框
+                    score_thr = 0.10  # 额外显示阈值；解码仍使用 head.test_cfg 的阈值和 NMS
+                    out_dir = Path('/home/wangyushen/Data/Outputs/daocc/w_mask/train_debug/vis_detection')
+                    out_dir = out_dir / (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_pid' + str(os.getpid()))
+                    out_dir.mkdir(parents=True, exist_ok=False)
+
+                    # clone 避免解码中的原地操作修改训练张量；不重新 forward，不切换模型模式。
+                    def clone_tree(value):
+                        if torch.is_tensor(value):
+                            return value.detach().clone()
+                        if isinstance(value, dict):
+                            return {k: clone_tree(v) for k, v in value.items()}
+                        if isinstance(value, list):
+                            return [clone_tree(v) for v in value]
+                        if isinstance(value, tuple):
+                            return tuple(clone_tree(v) for v in value)
+                        return value
+
+                    with torch.no_grad():
+                        decoded = head.get_bboxes(clone_tree(pred_dict), metas)
+                    pred_boxes, pred_scores, pred_labels = decoded[sample_idx]
+                    gt_boxes = gt_bboxes_3d[sample_idx].to('cpu')
+                    pred_boxes = pred_boxes.to('cpu')
+                    gt_array = gt_boxes.tensor.detach().numpy()
+                    pred_array = pred_boxes.tensor.detach().numpy()
+                    gt_ids = gt_labels_3d[sample_idx].detach().cpu().numpy()
+                    pred_ids = pred_labels.detach().cpu().numpy()
+                    scores = pred_scores.detach().cpu().numpy()
+                    cloud = points[sample_idx].detach().cpu().numpy()[:, :3]
+                    class_names = [name for task in head.class_names for name in task]
+
+                    gt_valid = np.isfinite(gt_array[:, :7]).all(axis=1) & (gt_array[:, 3:6] > 0).all(axis=1)
+                    pred_valid = np.isfinite(pred_array[:, :7]).all(axis=1) & (pred_array[:, 3:6] > 0).all(axis=1)
+                    keep = pred_valid & np.isfinite(scores) & (scores >= score_thr)
+                    def corners(boxes, valid):
+                        selected = boxes[torch.from_numpy(valid)]
+                        return selected.corners.detach().numpy() if len(selected) else np.empty((0, 8, 3))
+                    gt_corners, pred_corners = corners(gt_boxes, gt_valid), corners(pred_boxes, keep)
+                    cloud = cloud[np.isfinite(cloud).all(axis=1)]
+                    cloud = cloud[::max(1, int(np.ceil(len(cloud) / 40000.0)))]
+                    limits = head.train_cfg['point_cloud_range']
+                    fig = Figure(figsize=(24, 15))
+                    FigureCanvasAgg(fig)  # 无需 DISPLAY、GUI 或 plt.show()
+                    edges = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
+                    groups = [(gt_corners, gt_ids[gt_valid], None, 'limegreen'),
+                              (pred_corners, pred_ids[keep], scores[keep], 'orangered')]
+                    for col, title in enumerate(['GT', 'Prediction', 'Overlay: green=GT, red=prediction']):
+                        selected_groups = [groups[col]] if col < 2 else groups
+                        ax = fig.add_subplot(2, 3, col + 1)
+                        ax3 = fig.add_subplot(2, 3, col + 4, projection='3d')
+                        ax.scatter(cloud[:, 0], cloud[:, 1], s=0.2, c='gray', alpha=0.4)
+                        ax3.scatter(cloud[:, 0], cloud[:, 1], cloud[:, 2], s=0.2, c='gray', alpha=0.15)
+                        for box_corners, ids, conf, color in selected_groups:
+                            label_order = np.arange(len(ids)) if conf is None else np.argsort(-conf)
+                            label_indices = set(label_order[:max_text_labels].tolist())
+                            style = '-' if conf is None else '--'
+                            for j, (c, label) in enumerate(zip(box_corners, ids)):
+                                outline = c[[0, 3, 7, 4, 0]]
+                                ax.plot(outline[:, 0], outline[:, 1], color=color, linewidth=1.0, linestyle=style)
+                                center, front = c.mean(axis=0), c[[4,5,6,7]].mean(axis=0)
+                                ax.annotate('', xy=front[:2], xytext=center[:2],
+                                    arrowprops=dict(arrowstyle='->', color=color, lw=0.8))
+                                text = class_names[int(label)] if 0 <= label < len(class_names) else str(label)
+                                if conf is not None:
+                                    text += ' %.2f' % conf[j]
+                                if col < 2 and j in label_indices:  # 叠加图不加文字，避免遮挡
+                                    ax.text(center[0], center[1], text, color=color, fontsize=6,
+                                        clip_on=True, bbox=dict(facecolor='white', alpha=0.65, edgecolor='none', pad=0.3))
+                                for a, b in edges:
+                                    ax3.plot(c[[a,b],0], c[[a,b],1], c[[a,b],2], color=color, linewidth=0.6)
+                        ax.set(title=title, xlabel='LiDAR x (m)', ylabel='LiDAR y (m)',
+                               xlim=(limits[0], limits[3]), ylim=(limits[1], limits[4]))
+                        ax.set_aspect('equal')
+                        ax.grid(alpha=0.2)
+                        ax.plot(0, 0, 'k+', markersize=10)
+                        ax.legend(handles=[Line2D([0], [0], color='limegreen', label='GT', linestyle='-'),
+                            Line2D([0], [0], color='orangered', label='Prediction', linestyle='--')],
+                            loc='upper right', fontsize=8)
+                        ax3.set(xlabel='x (m)', ylabel='y (m)', zlabel='z (m)',
+                                xlim=(limits[0], limits[3]), ylim=(limits[1], limits[4]), zlim=(limits[2], limits[5]))
+                        ax3.view_init(elev=25, azim=-60)
+                        # 保持三轴物理比例，避免将高度夸大。旧版 matplotlib 无此接口时沿用默认显示。
+                        if hasattr(ax3, 'set_box_aspect'):
+                            ax3.set_box_aspect(np.asarray(limits[3:6]) - np.asarray(limits[:3]))
+                    invalid_gt = int((~gt_valid).sum())
+                    invalid_pred = int((~pred_valid | ~np.isfinite(scores)).sum())
+                    invalid_labels = int(((gt_ids < 0) | (gt_ids >= len(class_names))).sum()
+                        + ((pred_ids < 0) | (pred_ids >= len(class_names))).sum())
+                    caption = ('Augmented LiDAR frame | sample=%d | GT=%d | decoded=%d | shown=%d | score >= %.2f'
+                        % (sample_idx, len(gt_array), len(pred_array), int(keep.sum()), score_thr))
+                    caption += chr(10) + ('Invalid geometry/score: GT=%d, prediction=%d | invalid class IDs=%d | arrows=heading'
+                        % (invalid_gt, invalid_pred, invalid_labels))
+                    fig.suptitle(caption, fontsize=13)
+                    fig.tight_layout(rect=(0, 0, 1, 0.94))
+                    fig.savefig(str(out_dir / 'gt_pred.png'), dpi=180)
+                    # 复用画布输出近距离细节图，只调整视野，不再次推理或解码。
+                    for ax in fig.axes:
+                        ax.set_xlim(-zoom_radius, zoom_radius)
+                        ax.set_ylim(-zoom_radius, zoom_radius)
+                        if hasattr(ax, 'set_zlim') and hasattr(ax, 'set_box_aspect'):
+                            ax.set_box_aspect((2 * zoom_radius, 2 * zoom_radius, limits[5] - limits[2]))
+                    fig.suptitle(caption + chr(10) + 'Zoom: +/- %.1f m around LiDAR origin' % zoom_radius, fontsize=13)
+                    fig.savefig(str(out_dir / 'gt_pred_zoom.png'), dpi=180)
+                    fig.clear()
+                    print('Saved PNG images to:', out_dir)
+                    """), dict(globals(), **locals()))
+                    '''
+                    losses = head.loss(gt_bboxes_3d, gt_labels_3d, pred_dict) #* gt_bboxes_3d:(45,9)
                 elif head_type == "map":
                     losses = head(x, gt_masks_bev)
-                elif head_type == "occ":
+                #*---------------------------------------#
+                #* 占据预测Head
+                elif head_type == "occ": #* "occ"
                     # TODO: [yz] this is so weird!
+                    '''
+
+                    '''
                     occ_pred = head(x, lidar_aug_matrix, lidar2ego, kwargs['occ_aug_matrix'])
                     losses = head.loss(occ_pred, kwargs['voxel_semantics'], kwargs['mask_camera'])
                 else:

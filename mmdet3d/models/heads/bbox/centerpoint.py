@@ -348,10 +348,10 @@ class CenterHead(BaseModule):
         """
         ret_dicts = []
 
-        x = self.shared_conv(x)
-
-        for task in self.task_heads:
-            ret_dicts.append(task(x))
+        x = self.shared_conv(x) # * (1 512 180 180) -> (1 64 180 180)
+        # *---------------------------------#
+        for task in self.task_heads: #* 6: 每类目标一个预测Head
+            ret_dicts.append(task(x)) #* reg:(1 2 180 180) height:(1 1 180 180) dim:(1 3 180 180) rot:(1 2 180 180) vel:(1 2 180 180)  heatmap:(1 1 180 180)
 
         return ret_dicts
 

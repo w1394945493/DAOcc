@@ -19,6 +19,8 @@ python tools/create_data.py \
   --out-dir /home/wys/wangyushen/data/Datasets/nuscenes/anns/daocc \
   --extra-tag nuscenes \
   --occ3d-root /home/wys/wangyushen/data/Datasets/nuscenes/gts
+
+
 #* ----------------------------------------
 # * ININ-3090 NuScenes
 python tools/create_data.py \
@@ -134,6 +136,26 @@ python tools/train.py "$CONFIG" \
   --evaluation.interval 1 \
   --max_keep_ckpt 1
 
+#* -----------------------------------
+#* inin-3090
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+DATA=/home/wangyushen/Data
+CONFIG=/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin.yaml
+PRETRAIN="$DATA/Weights/daocc/pretrained/resnet50-0676ba61.pth"
+CUDA_VISIBLE_DEVICES=0 \
+python tools/train.py "$CONFIG" \
+  --run-dir "$DATA/Outputs/daocc/w_mask/train_debug" \
+  --model.encoders.camera.backbone.init_cfg.checkpoint "$PRETRAIN" \
+  --data.samples_per_gpu 1 \
+  --data.workers_per_gpu 0 \
+  --max_epochs 6 \
+  --log_config.interval 1 \
+  --checkpoint_config.interval 1 \
+  --evaluation.interval 1 \
+  --max_keep_ckpt 1
+
+
 # ===================================================#
 # 多卡训练
 # 修改/public/home/xiess261023/envs/daocc-cu121/lib/python3.8/site-packages/mmcv/parallel/distributed.py
@@ -149,7 +171,7 @@ python tools/train.py "$CONFIG" \
 # )
 
 
-# BIT-服务器
+#* BIT-服务器
 cd /public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc
 
 DATA=/public/home/xiess261023/wangyushen/Data
@@ -230,14 +252,17 @@ GPUS=4,5,6,7 \
 BATCH_SIZE=4 \
 WORKERS=4 \
 MAX_EPOCHS=6 \
-LOG_INTERVA=50 \
+LOG_INTERVAL=50 \
 CHECKPOINT_INTERVAL=1 \
 EVAL_INTERVAL=1 \
 MAX_KEEP_CKPT=1 \
 DATA=/home/wangyushen/Data \
 CONFIG=/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin.yaml \
 PRETRAIN=/home/wangyushen/Data/Weights/daocc/pretrained/resnet50-0676ba61.pth \
-RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train \
+RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_fp32_debug \
+FP32=1 \
+NAN_DEBUG=1 \
+NAN_STOP_ON_ERROR=0 \
 PYTHON=python \
 bash scripts/train_occ3d.sh
 

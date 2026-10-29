@@ -217,8 +217,14 @@ data:
   samples_per_gpu: 4
   workers_per_gpu: 4
   train:
+    # 训练集外层使用 CBGS 包装器。tools/train.py 以 recursive=True 加载配置，
+    # 所以下级 occ3d/*.yaml 即使只覆盖 train.dataset.ann_file，也会保留此设置。
+    # CBGS 根据一帧中出现的 3D 检测框类别重采样“场景”，用于缓解检测类别长尾；
+    # 它不统计或直接平衡 occupancy 的 18 个体素语义类别。
+    # val/test 没有套 CBGSDataset，因此验证和测试仍按原始数据顺序与长度执行。
     type: CBGSDataset
     dataset:
+      # 被 CBGS 包装的真实数据集。外层负责索引重采样，内层负责读取样本和流水线。
       type: ${dataset_type}
       dataset_root: ${dataset_root}
       ann_file: ${dataset_root + "nuscenes_infos_train_w_3occ.pkl"}

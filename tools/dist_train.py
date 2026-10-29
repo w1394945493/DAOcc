@@ -24,6 +24,12 @@ def main():
     parser.add_argument('--launcher', choices=['none', 'pytorch', 'slurm', 'mpi'], default='none', help='job launcher')
     args, opts = parser.parse_known_args()
 
+    # 精度配置先从 YAML 递归加载，再由命令行 opts 覆盖；两个训练入口规则相同。
+    # FP32：在原训练命令后追加 --fp16 None（Torchpack 将 None 解析为空值）。
+    # FP16/FP32 混合精度：保留默认 fp16 字典，不传 --fp16 None。
+    # 若 YAML 已将 fp16 设为 null，可用 --fp16 "{'loss_scale': {'growth_interval': 2000}}" 开启。
+    # 不支持通过 --fp16 True 开启：该参数需要字典或 None，不是布尔开关。
+    # 本入口只读取设置，真正启用精度模式在 mmdet3d/apis/train.py 的 OptimizerHook 中。
     configs.load(args.config, recursive=True)
     configs.update(opts)
 

@@ -13,6 +13,9 @@ class Base3DFusionModel(BaseModule, metaclass=ABCMeta):
 
     def __init__(self, init_cfg=None):
         super().__init__(init_cfg)
+        # 默认关闭自动半精度；启用 cfg.fp16 后，MMCV 的 FP16 Hook 会在训练开始时开启。
+        # 这是供 auto_fp16/force_fp32 使用的运行时标志，不是用户切换训练精度的位置。
+        # 用户应设置顶层 cfg.fp16；不要在这里直接改 True 或手动 model.half()。
         self.fp16_enabled = False
 
     def _parse_losses(self, losses):

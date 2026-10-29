@@ -185,7 +185,10 @@ class NuScenesDataset(Custom3DDataset):
             )
 
     def get_cat_ids(self, idx):
-        """Get category distribution of single scene.
+        """返回一个场景包含的检测类别 ID，供外层 CBGSDataset 统计和重采样。
+
+        CBGS 在这里平衡的是 3D 检测目标类别；本方法不读取 occupancy 体素标签，
+        因此不会直接平衡占据预测的语义类别。
 
         Args:
             idx (int): Index of the data_info.
@@ -197,12 +200,15 @@ class NuScenesDataset(Custom3DDataset):
         """
         info = self.data_infos[idx]
         if self.use_valid_flag:
+            # 当前训练配置 use_valid_flag=True，只统计 valid_flag 标记有效的 3D 框。
             mask = info["valid_flag"]
             gt_names = set(info["gt_names"][mask])
         else:
             gt_names = set(info["gt_names"])
 
         cat_ids = []
+        # 使用 set 后，同一场景内某类别无论有多少个框都只返回一次；CBGS 平衡的是
+        # “包含该类别的场景数”，不是该类别的框实例总数。
         for name in gt_names:
             if name in self.CLASSES:
                 cat_ids.append(self.cat2id[name])

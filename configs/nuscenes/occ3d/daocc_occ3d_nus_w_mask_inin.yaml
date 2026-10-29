@@ -211,6 +211,8 @@ model:
     object: 0.01
     occ: 1.0
 
+# AdamW: 基础学习率2e-4，前500个iteration使用线性warmup
+# warmup开始时，2e-4/3=6.67e-5，500步内逐步增加到6.67e-5
 optimizer:
   type: AdamW
   lr: 2.0e-4
@@ -221,6 +223,8 @@ optimizer_config:
     max_norm: 35
     norm_type: 2
 
+# warmup 结束后，按照余弦退火逐渐降低学习率。
+# min_lr_ratio: 1e-3 表示余弦退火的理论目标最小学习率为：2e-4 × 1e-3 = 2e-7
 lr_config:
   policy: CosineAnnealing
   warmup: linear

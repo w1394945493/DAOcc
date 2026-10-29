@@ -63,6 +63,8 @@ class NuScenesDatasetOccupancy(NuScenesDataset):
         test_mode=False,
         eval_version="detection_cvpr_2019",
         use_valid_flag=False,
+        # CBGSDataset 会读取此开关。默认 True 表示真正采用 CBGS 生成的索引；
+        # 设为 False 时即使外层仍是 CBGSDataset，也会按原数据集索引和长度取样。
         resample=True,
         data_type='occ3d'
     ) -> None:
@@ -81,6 +83,7 @@ class NuScenesDatasetOccupancy(NuScenesDataset):
             eval_version,
             use_valid_flag,
         )
+        # 仅保存开关；具体类别统计及 sample_indices 生成在外层 CBGSDataset 中完成。
         self.resample = resample
         assert data_type in ['occ3d', 'surround_occ', 'open_occ']
         self.data_type = data_type

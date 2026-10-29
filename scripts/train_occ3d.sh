@@ -25,6 +25,23 @@ MAX_KEEP_CKPT=${MAX_KEEP_CKPT:-1}  # 普通权重和 EMA 权重各自保留的�
 LOAD_FROM=${LOAD_FROM:-None}  # 仅加载模型权重；自动恢复 checkpoint 时优先 resume_from。
 EMA_RESUME=${EMA_RESUME:-None}  # 显式指定 EMA 优先于自动匹配同轮文件。
 
+# 可选 NaN/Inf 记录，0 关闭、1 开启。默认关闭，不安装诊断 Hook。
+# 示例：NAN_DEBUG=1 RUN_DIR=/新输出目录 bash scripts/train_occ3d.sh
+# 已损坏的 checkpoint 不可用于定位首次异常；本脚本仍会自动恢复 RUN_DIR 中的权重。
+# 精度设置示例（在 DAOcc 目录执行）：
+#   FP32=1 bash scripts/train_occ3d.sh  -> 追加 --fp16 None，关闭 FP16 混合精度。
+#   FP32=0 bash scripts/train_occ3d.sh  -> 沿用 YAML；默认 default.yaml 开启 FP16/FP32 混合精度。
+# FP32=0 不会强制开启 FP16：若 YAML 中 fp16 为 null，仍使用 FP32。
+# 若 YAML 已关闭而想重新开启，请把顶层 fp16 恢复为 default.yaml 中的 loss_scale 字典。
+# 这里的“FP16”不是纯半精度；脚本没有纯 FP16/BF16 开关。
+# 比较两种精度时请使用不同 RUN_DIR；脚本会自动恢复已有目录中的 checkpoint。
+FP32=${FP32:-0}
+NAN_DEBUG=${NAN_DEBUG:-0}
+NAN_STOP_ON_ERROR=${NAN_STOP_ON_ERROR:-0}  # 1：各 rank 保存后停止；0：继续记录。
+NAN_SAVE_BATCH=${NAN_SAVE_BATCH:-1}       # 0：仅保存 JSON 摘要；1：同时保存实际 batch。
+NAN_DEBUG_DIR=${NAN_DEBUG_DIR:-$RUN_DIR/nan_debug}
+# 开启后每步扫描状态，有额外开销；持续异常时完整 batch 可能占用大量磁盘。
+
 # 分布式启动参数；默认仍为单机。多机时各节点使用相同 MASTER_ADDR/PORT。
 DISTRIBUTED_MODULE=${DISTRIBUTED_MODULE:-torch.distributed.run}
 TRAIN_SCRIPT=${TRAIN_SCRIPT:-tools/dist_train.py}
@@ -63,6 +80,9 @@ for param in LOG_INTERVAL CHECKPOINT_INTERVAL EVAL_INTERVAL NNODES NPROC_PER_NOD
 done
 [[ $MAX_KEEP_CKPT =~ ^[1-9][0-9]*$ ]] || fail 'MAX_KEEP_CKPT 必须为正整数'
 [[ $STANDALONE =~ ^[01]$ ]] || fail 'STANDALONE 必须为 0 或 1'
+for param in FP32 NAN_DEBUG NAN_STOP_ON_ERROR NAN_SAVE_BATCH; do
+    [[ ${!param} =~ ^[01]$ ]] || fail "$param 必须为 0 或 1"
+done
 [[ $NODE_RANK =~ ^(0|[1-9][0-9]*)$ ]] || fail 'NODE_RANK 必须为非负整数'
 (( NPROC_PER_NODE <= NUM_GPUS )) || fail 'NPROC_PER_NODE 不能超过可见 GPU 数量'
 (( NODE_RANK < NNODES )) || fail 'NODE_RANK 必须小于 NNODES'
@@ -137,6 +157,28 @@ else
 fi
 
 CMD+=(--custom_hooks.resume "$EMA_RESUME")
+
+# Torchpack 将 None 解析为 Python 空值，训练入口据此禁用 FP16 Hook。
+if (( FP32 )); then
+    CMD+=(--fp16 None)
+    echo '精度：FP32（已关闭 FP16 混合精度）'
+else
+    echo '精度：沿用 YAML 配置'
+fi
+
+# Torchpack 用 literal_eval 解析，因此传 Python 布尔字面量 True/False。
+# 显式传 False 可覆盖 YAML 中的开启设置，确保 NAN_DEBUG=0 真正关闭。
+if (( NAN_DEBUG )); then
+    nan_stop=False
+    nan_save=False
+    if (( NAN_STOP_ON_ERROR )); then nan_stop=True; fi
+    if (( NAN_SAVE_BATCH )); then nan_save=True; fi
+    CMD+=(--nan_debug.enabled True --nan_debug.out_dir "$NAN_DEBUG_DIR"
+        --nan_debug.stop_on_error "$nan_stop" --nan_debug.save_batch "$nan_save")
+    echo "NaN 记录：开启；目录：$NAN_DEBUG_DIR；保存 batch：$nan_save；异常停止：$nan_stop"
+else
+    CMD+=(--nan_debug.enabled False)
+fi
 
 echo "GPU：$GPUS；每卡 batch：$BATCH_SIZE；总 batch：$((NNODES * NPROC_PER_NODE * BATCH_SIZE))；总 epochs：$MAX_EPOCHS"
 echo "输出目录：$RUN_DIR"

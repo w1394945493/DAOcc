@@ -245,9 +245,10 @@ python -m torch.distributed.run \
   --evaluation.interval 1 \
   --max_keep_ckpt 1
 
-# *==================================================#
+# *================================================================================#
+# *ININ 3090 服务器
+# 启用CGBS策略，总bs=16，训练6个epoch
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
-
 GPUS=4,5,6,7 \
 BATCH_SIZE=4 \
 WORKERS=4 \
@@ -266,6 +267,17 @@ NAN_STOP_ON_ERROR=0 \
 PYTHON=python \
 bash scripts/train_occ3d.sh
 
+# 不启用CGBS策略，总bs=4，训练24个epoch
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+GPUS=2,3 \
+BATCH_SIZE=2 \
+WORKERS=4 \
+MAX_EPOCHS=24 \
+CONFIG=/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_no_cbgs.yaml \
+RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_fp32_no_cbgs \
+FP32=1 \
+PYTHON=python \
+bash scripts/train_occ3d.sh
 
 # *======================================================================================================#
 # *(10.26) DAOcc：CUDA 12.1 环境配置与验证
@@ -576,3 +588,58 @@ fi
 #   --model-dir /public/home/xiess261023/wangyushen/Data/Outputs/daocc/weights/occ3d_nus_w_mask/tensorrt-int8 \
 #   --data-dir /实际推理输入数据目录 \
 #   --precision int8
+
+# * 训练测速
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+CUDA_VISIBLE_DEVICES=0 \
+PYTHONPATH=$PWD \
+/home/wangyushen/miniforge3/envs/daocc-cu121/bin/python \
+tools/profile_train_stages.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin.yaml \
+--gpu 0 \
+--fp32 \
+--batch-size 2 \
+--workers 4 \
+--warmup-iters 10 \
+--profile-iters 50 \
+--output /home/wangyushen/Data/Outputs/daocc/tmp/daocc_train_fp32_timing.json
+
+# 验证3D GT迁移是否正确
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+PYTHONPATH=$PWD \
+/home/wangyushen/miniforge3/envs/daocc-cu121/bin/python \
+tools/validate_center_targets_migration.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin.yaml \
+--num-samples 20 \
+--batch-size 2 \
+--seed 0
+# 去掉Lidar分支：纯视觉分支
+# 去掉Lidar体素化，Lidar backbone分支使用辅助视觉分支代替，保持结构和参数量基本保持不变
+# fp16-训练测速
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+/home/wangyushen/miniforge3/envs/daocc-cu121/bin/python \
+tools/profile_train_stages.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_camera_only.yaml \
+--gpu 0 \
+--batch-size 2 \
+--workers 4 \
+--warmup-iters 10 \
+--profile-iters 50 \
+--output /home/wangyushen/Data/Outputs/daocc/tmp/daocc_camera_only_fp16.json
+
+# fp32-训练测速
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+/home/wangyushen/miniforge3/envs/daocc-cu121/bin/python \
+tools/profile_train_stages.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_camera_only.yaml \
+--gpu 0 \
+--batch-size 2 \
+--workers 4 \
+--warmup-iters 10 \
+--profile-iters 50 \
+--fp32 \
+--output /home/wangyushen/Data/Outputs/daocc/tmp/daocc_camera_only_fp32.json

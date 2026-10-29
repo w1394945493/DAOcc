@@ -609,7 +609,18 @@ class CenterHead(BaseModule):
         Returns:
             dict[str:torch.Tensor]: Loss of heatmap and bbox of each task.
         """
-        heatmaps, anno_boxes, inds, masks = self.get_targets(gt_bboxes_3d, gt_labels_3d)
+        # (10.29 检测GT迁移) 原来在训练主进程中生成目标的代码暂时保留为注释，
+        # (10.29 检测GT迁移) 便于核对迁移前后的行为，不删除原有实现。
+        # heatmaps, anno_boxes, inds, masks = self.get_targets(
+        #     gt_bboxes_3d, gt_labels_3d
+        # )
+        # (10.29 检测GT迁移) 目标现由 GenerateCenterHeadTargets 在 DataLoader
+        # (10.29 检测GT迁移) worker 中提前生成；collate 后已经具有 batch 维度。
+        object_targets = kwargs["object_targets"]
+        heatmaps = object_targets["heatmaps"]
+        anno_boxes = object_targets["anno_boxes"]
+        inds = object_targets["inds"]
+        masks = object_targets["masks"]
         loss_dict = dict()
         for task_id, preds_dict in enumerate(preds_dicts):
             # heatmap focal loss

@@ -97,6 +97,13 @@ train_pipeline:
   -
     type: ObjectNameFilter
     classes: ${object_classes}
+  # (10.29 检测GT迁移) 必须放在所有三维增强、翻转和 GT 范围/类别过滤之后，
+  # (10.29 检测GT迁移) 保证预生成的 CenterHead 目标与最终送入模型的 GT 完全一致。
+  -
+    type: GenerateCenterHeadTargets
+    tasks: ${model.heads.object.tasks}
+    train_cfg: ${model.heads.object.train_cfg}
+    norm_bbox: ${model.heads.object.norm_bbox}
   -
     type: ImageNormalize
     mean: [0.485, 0.456, 0.406]
@@ -124,6 +131,9 @@ train_pipeline:
       - points
       - gt_bboxes_3d
       - gt_labels_3d
+      # (10.29 检测GT迁移) DataLoader worker 已生成的检测 heatmap、框回归目标、
+      # (10.29 检测GT迁移) 中心索引和有效 mask；Collect3D 将其送入模型 kwargs。
+      - object_targets
       - voxel_semantics
       - mask_lidar
       - mask_camera

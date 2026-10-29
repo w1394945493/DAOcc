@@ -444,7 +444,14 @@ class BEVFusion(Base3DFusionModel):
                     print('Saved PNG images to:', out_dir)
                     """), dict(globals(), **locals()))
                     '''
-                    losses = head.loss(gt_bboxes_3d, gt_labels_3d, pred_dict) #* gt_bboxes_3d:(45,9)
+                    # (10.29 检测GT迁移) object_targets 已由 DataLoader worker 根据
+                    # (10.29 检测GT迁移) 最终增强后的 GT 生成，这里传给 CenterHead.loss。
+                    losses = head.loss(
+                        gt_bboxes_3d,
+                        gt_labels_3d,
+                        pred_dict,
+                        object_targets=kwargs["object_targets"],
+                    ) #* gt_bboxes_3d:(45,9)
                 elif head_type == "map":
                     losses = head(x, gt_masks_bev)
                 #*---------------------------------------#

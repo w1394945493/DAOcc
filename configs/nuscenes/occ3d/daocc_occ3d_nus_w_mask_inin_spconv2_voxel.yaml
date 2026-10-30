@@ -14,8 +14,6 @@ data:
   train:
     dataset:
       ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_train.pkl
-      # 若关闭CBGS策略，在dataset下面增加
-      # resample: false
   val:
     ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_val.pkl
   test:
@@ -37,15 +35,13 @@ model:
   encoders:
     lidar:
       voxelize:
-        # 使用 spconv2 PointToVoxel；未配置 type 的原配置仍使用旧 Voxelization。
-        type: Spconv2Voxelization
+        type: Spconv2Voxelization # 使用 spconv2 PointToVoxel；未配置 type 的原配置仍使用旧 Voxelization。
         max_num_points: 10
         point_cloud_range: ${point_cloud_range}
         voxel_size: ${voxel_size}
         max_voxels: [ 120000, 160000 ]
       backbone:
-        # 使用独立的官方 spconv 2.x 实现；原 SparseEncoder 和原配置不变。
-        type: SparseEncoderSpconv2
+        type: SparseEncoderSpconv2 # 使用独立的官方 spconv 2.x 实现；原 SparseEncoder 和原配置不变。
         in_channels: 5
         sparse_shape: [ 1440, 1440, 41 ]
         output_channels: 128

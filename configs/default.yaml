@@ -20,6 +20,12 @@ log_config:
     -
       type: TensorboardLoggerHook
 
+# nuScenes检测评估会先把预测框转换成results_nusc.json，再调用官方评估工具。
+# 指定该目录后，不再使用系统自动创建的/tmp/tmpxxxx临时目录；各任务配置中的
+# evaluation.interval仍负责控制评估频率。后续评估会覆盖同名结果文件。
+evaluation:
+  jsonfile_prefix: /home/wangyushen/Data/Outputs/tmp
+
 load_from: null
 resume_from: null
 

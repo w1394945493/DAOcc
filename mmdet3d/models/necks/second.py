@@ -124,6 +124,7 @@ class FPN_LSS(BaseModule):
             scale_factor=scale_factor, mode='bilinear', align_corners=True)
 
         channels_factor = 2 if self.extra_upsample else 1
+        # --------------------------------------------------------------------------------------#
         # 当前配置的两层3×3卷积：640→512→512，每层后接BN、ReLU。
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels * channels_factor, kernel_size=3, padding=1, bias=False),

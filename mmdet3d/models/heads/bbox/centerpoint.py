@@ -315,7 +315,7 @@ class CenterHead(BaseModule):
         self.bbox_coder = build_bbox_coder(bbox_coder)
         self.num_anchor_per_locs = [n for n in num_classes]
         self.with_velocity = with_velocity
-        self.fp16_enabled = False
+        self.fp16_enabled = False #* fp16_enabled
 
         # a shared convolution
         self.shared_conv = ConvModule(

@@ -166,19 +166,20 @@ else
     echo '精度：沿用 YAML 配置'
 fi
 
+# 暂时停用 NaN/Inf 诊断参数注入，与 mmdet3d/apis/train.py 中已注释的
+# install_nan_debug() 保持一致。保留原代码，后续需要诊断时可整体取消注释。
 # Torchpack 用 literal_eval 解析，因此传 Python 布尔字面量 True/False。
-# 显式传 False 可覆盖 YAML 中的开启设置，确保 NAN_DEBUG=0 真正关闭。
-if (( NAN_DEBUG )); then
-    nan_stop=False
-    nan_save=False
-    if (( NAN_STOP_ON_ERROR )); then nan_stop=True; fi
-    if (( NAN_SAVE_BATCH )); then nan_save=True; fi
-    CMD+=(--nan_debug.enabled True --nan_debug.out_dir "$NAN_DEBUG_DIR"
-        --nan_debug.stop_on_error "$nan_stop" --nan_debug.save_batch "$nan_save")
-    echo "NaN 记录：开启；目录：$NAN_DEBUG_DIR；保存 batch：$nan_save；异常停止：$nan_stop"
-else
-    CMD+=(--nan_debug.enabled False)
-fi
+# if (( NAN_DEBUG )); then
+#     nan_stop=False
+#     nan_save=False
+#     if (( NAN_STOP_ON_ERROR )); then nan_stop=True; fi
+#     if (( NAN_SAVE_BATCH )); then nan_save=True; fi
+#     CMD+=(--nan_debug.enabled True --nan_debug.out_dir "$NAN_DEBUG_DIR"
+#         --nan_debug.stop_on_error "$nan_stop" --nan_debug.save_batch "$nan_save")
+#     echo "NaN 记录：开启；目录：$NAN_DEBUG_DIR；保存 batch：$nan_save；异常停止：$nan_stop"
+# else
+#     CMD+=(--nan_debug.enabled False)
+# fi
 
 echo "GPU：$GPUS；每卡 batch：$BATCH_SIZE；总 batch：$((NNODES * NPROC_PER_NODE * BATCH_SIZE))；总 epochs：$MAX_EPOCHS"
 echo "输出目录：$RUN_DIR"

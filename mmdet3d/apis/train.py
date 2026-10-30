@@ -26,7 +26,10 @@ def train_model(
 ):
     logger = get_root_logger()
 
-    # prepare data loaders
+    # 构建训练 DataLoader。cfg.seed 作为基础种子传入 MMDetection：框架会结合
+    # worker id（分布式训练时还会结合 rank）为数据加载进程设置随机种子，并用于
+    # 分布式采样器的数据打乱。这样相同 seed 下的数据顺序和随机增强尽量一致。
+    # 这里只负责数据侧随机性；是否启用确定性 CUDA 算法由 tools/train.py 设置。
     dataset = dataset if isinstance(dataset, (list, tuple)) else [dataset]
 
     data_loaders = [
@@ -76,7 +79,13 @@ def train_model(
 
     # an ugly workaround to make .log and .log.json filenames the same
     runner.timestamp = timestamp
-
+    #* ----------------------------------------------------------------------#
+    #* (1) 顶层配置config决定启用混合精度还是FP32
+    #* (2) @auto_fp16、@force_fp32 决定各方法的计算精度；
+    #* (3) Fp16OptimizerHook + GradScaler 负责反向传播的loss缩放
+    
+    #* 训练开始时Fp16OptimizerHook.before_run() 会执行： wrap_fp16_model(runner.model),
+    #* 遍历该模型,把具有fp16装饰器的模块设置为True
     # 精度总开关来自合并后的 cfg，而不是 tools/train.py 中手动转换模型类型。
     # cfg.fp16 为字典：启用 FP16/FP32 混合精度；为 None：不安装 FP16 Hook，走 FP32 路径。
     # FP32 设置：YAML 写 fp16: null，或训练命令追加 --fp16 None；不要传 False。
@@ -234,9 +243,9 @@ def train_model(
     elif cfg.load_from:
         runner.load_checkpoint(cfg.load_from)
 
-    # 可选 NaN/Inf 记录：默认不导入、不扫描。删除此块及 utils/nan_debug.py 即可移除。
-    if cfg.get("nan_debug", {}).get("enabled", False):
-        from mmdet3d.utils.nan_debug import install_nan_debug
-        install_nan_debug(runner, cfg.nan_debug)
+    # 暂时停用可选 NaN/Inf 记录。保留原代码，后续需要诊断时可取消注释。
+    # if cfg.get("nan_debug", {}).get("enabled", False):
+    #     from mmdet3d.utils.nan_debug import install_nan_debug
+    #     install_nan_debug(runner, cfg.nan_debug)
 
     runner.run(data_loaders, [("train", 1)])

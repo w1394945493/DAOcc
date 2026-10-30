@@ -54,7 +54,7 @@ class SparseEncoder(nn.Module):
         self.encoder_channels = encoder_channels
         self.encoder_paddings = encoder_paddings
         self.stage_num = len(self.encoder_channels)
-        self.fp16_enabled = False
+        self.fp16_enabled = False #* fp16_enabled
         # Spconv init all weight on its own
 
         assert isinstance(order, (list, tuple)) and len(order) == 3

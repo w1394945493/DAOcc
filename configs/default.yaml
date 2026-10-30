@@ -1,4 +1,10 @@
+# 训练使用的基础随机种子。非 null 时，训练入口会同时设置 Python random、
+# NumPy 和 PyTorch 的随机数种子；DataLoader 也会用它派生采样器及各 worker 的种子。
+# 固定 seed 可以让模型初始化、数据打乱、随机数据增强和 CBGS 重采样尽量可复现。
 seed: 0
+# 是否要求 cuDNN 优先采用确定性算法。false 表示虽然随机种子固定，但部分 CUDA
+# 算子、多卡归约、自定义算子或稀疏卷积仍可能产生细微差异；true 可提高复现性，
+# 但可能降低速度，而且不能保证项目中的所有自定义 CUDA 算子都完全确定。
 deterministic: false
 max_keep_ckpt: 1
 
@@ -17,6 +23,8 @@ log_config:
 load_from: null
 resume_from: null
 
+# true 时 cuDNN 会针对输入形状测试并选择较快算法，算法选择可能影响复现性。
+# 当前设为 false；deterministic=true 时训练入口也会强制将其关闭。
 cudnn_benchmark: false
 # 精度总开关（顶层配置）：这里的 fp16 表示 FP16 + FP32 混合精度，不是全模型纯 FP16。
 # 1. 混合精度：保留下方字典；训练时由 MMCV FP16 Hook 配合模型装饰器管理精度。
@@ -25,12 +33,47 @@ cudnn_benchmark: false
 # 3. 当前入口没有提供纯 FP16 或 BF16 训练开关，不要用 model.half() 代替混合精度。
 # 命令行覆盖优先于 YAML；最终生效值可在运行目录 configs.yaml 和启动日志中查看。
 fp16:
-  # 梯度缩放：反向传播前放大 loss，更新前还原梯度，缓解 FP16 梯度下溢。
-  # 此处传字典使用动态缩放；growth_interval 表示连续无溢出多少步后增大 scale。
-  # 若反向频繁溢出，可在此添加 init_scale: 256.0；不能修复前向已出现的 NaN。
-  # 注意：它与 model.loss_scale（object/occ 等任务的损失权重）不是同一参数。
+  # loss_scale: 256.0
   loss_scale: 
     growth_interval: 2000 # 其余参数采用pytorch默认值： init_scale: 65536.0；backoff_factor: 0.5；growth_factor: 2.0
+
+# 梯度缩放：反向传播前计算 scaled_loss = loss * S，使很小的 FP16 梯度不易下溢为 0；
+# optimizer.step() 前再将梯度除以 S。GradScaler 会检查反缩放后的梯度是否含 Inf/NaN：
+# 梯度正常时才执行 optimizer.step()；梯度异常时跳过本次参数更新，避免污染模型参数。
+# loss_scale 只影响反向传播的数值范围，不能修复前向传播或 loss 计算中已经产生的 NaN。
+# 注意：这里的 fp16.loss_scale 与 model.loss_scale（object/occ 等任务的损失权重）无关。
+#
+# loss_scale 主要有以下设置方法：
+#
+# 1. 动态缩放（当前采用的写法）：
+#      loss_scale:
+#        init_scale: 256.0
+#        growth_factor: 2.0
+#        backoff_factor: 0.5
+#        growth_interval: 10000
+#    init_scale 只是训练开始时的 S，并非固定值。出现梯度 Inf/NaN 时，S 乘以
+#    backoff_factor；连续 growth_interval 次更新均无溢出时，S 乘以 growth_factor。
+#    如果字典中只写 growth_interval，其余参数使用 PyTorch 默认值：
+#    init_scale=65536.0、growth_factor=2.0、backoff_factor=0.5。
+#
+# 2. 使用 PyTorch 全部默认的动态缩放参数：
+#      loss_scale: dynamic
+#    等价于创建未传参数的 GradScaler，初始 S 通常为 65536，每连续 2000 次正常
+#    更新后翻倍，溢出时减半。
+#
+# 3. 固定缩放系数：
+#      loss_scale: 256.0
+#    S 始终为 256，不会自动增大或减小。梯度异常时仍会跳过 optimizer.step()，
+#    但下一次迭代仍使用 S=256。该写法适合排查后期 NaN 是否由动态增大 S 引起；
+#    如果固定值仍然过大，训练可能连续跳过更新而无法自行降低 S。
+#
+# 4. 关闭混合精度、改用 FP32：应将整个顶层配置改成 fp16: null，不能只把
+#    loss_scale 设为 null，也不要写 fp16: false。命令行可追加 --fp16 None。
+#
+# 当前配置属于动态缩放，只覆盖 growth_interval；因此训练从默认 S=65536 开始。
+# 结合当前 NaN 调试结果，若需要更保守的动态缩放，可显式加入 init_scale: 256.0，
+# 并适当增大 growth_interval；若要验证动态增长是否导致后期溢出，可临时改成
+# 数值形式 loss_scale: 256.0。
 
 max_epochs: 20
 runner:

@@ -57,10 +57,13 @@ train_pipeline:
     load_augmented: ${load_augmented}
   -
     type: LoadPointsFromMultiSweeps
+    #* 当前样本是关键帧；历史输入来自其 LIDAR_TOP 的 prev 链，通常包含非关键帧。
+    #* 训练时若候选历史帧多于9帧，将无放回随机选择9帧，并非固定取最近9帧。
     sweeps_num: 9
     load_dim: ${load_dim}
     use_dim: ${use_dim}
     reduce_beams: ${reduce_beams}
+    # 场景开头完全没有历史扫描时，重复当前关键帧点云进行填充。
     pad_empty_sweeps: true
     remove_close: true
     load_augmented: ${load_augmented}
@@ -162,7 +165,10 @@ test_pipeline:
     load_augmented: ${load_augmented}
   -
     type: LoadPointsFromMultiSweeps
-    sweeps_num: 9 # * 当前关键帧 + 9个历史扫描真，历史点云对齐到当前 LiDAR 坐标系后合并，再进行一次模型推理。
+    #* 当前关键帧加9个历史 LiDAR sweep；历史 sweep 通常是非关键帧。
+    # 测试数据集启用 test_mode 时固定取时间上最近的9帧，并将它们对齐到
+    # 当前关键帧 LiDAR 坐标系后合并，作为一次模型推理的输入。
+    sweeps_num: 9
     load_dim: ${load_dim}
     use_dim: ${use_dim}
     reduce_beams: ${reduce_beams}

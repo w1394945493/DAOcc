@@ -14,7 +14,7 @@ from mmdet3d.models.builder import (
     build_custom,
     build_head,
 )
-from mmdet3d.ops import Voxelization, DynamicScatter
+from mmdet3d.ops import DynamicScatter, Spconv2Voxelization, Voxelization
 from mmdet3d.models import FUSIONMODELS
 
 
@@ -50,10 +50,20 @@ class BEVFusion(Base3DFusionModel):
                 self.encoders["camera"]["bev_neck"] = build_neck(encoders["camera"]["bev_neck"])
 
         if encoders.get("lidar") is not None:
-            if encoders["lidar"]["voxelize"].get("max_num_points", -1) > 0:
-                voxelize_module = Voxelization(**encoders["lidar"]["voxelize"])
+            # 未配置 type 时保持原行为：硬体素仍使用仓库原 Voxelization，
+            # 因而原配置、原 SparseEncoder 及已有 checkpoint 均不受影响。
+            voxelize_cfg = dict(encoders["lidar"]["voxelize"])
+            voxelize_type = voxelize_cfg.pop("type", "Voxelization")
+            if voxelize_type == "Spconv2Voxelization":
+                voxelize_module = Spconv2Voxelization(**voxelize_cfg)
+            elif voxelize_type == "Voxelization" and voxelize_cfg.get(
+                "max_num_points", -1
+            ) > 0:
+                voxelize_module = Voxelization(**voxelize_cfg)
+            elif voxelize_type in ("Voxelization", "DynamicScatter"):
+                voxelize_module = DynamicScatter(**voxelize_cfg)
             else:
-                voxelize_module = DynamicScatter(**encoders["lidar"]["voxelize"])
+                raise ValueError(f"不支持的 LiDAR 体素化类型: {voxelize_type}")
             self.encoders["lidar"] = nn.ModuleDict(
                 {
                     "voxelize": voxelize_module,
@@ -197,6 +207,19 @@ class BEVFusion(Base3DFusionModel):
 
     # 仅在 fp16_enabled 开启时，将 img/points 中的 FP32 张量自动转成 FP16。
     # 几何变换等敏感子模块可通过 force_fp32 转回 FP32，因此这是混合精度。
+    # 这里逻辑可近似理解为:
+    # def forward(self, img, points, metas):
+    #   if not self.fp16_enabled:
+    #     # FP32训练：直接执行原方法
+    #     return original_forward(img, points, metas)
+
+    #   # 混合精度训练：
+    #   img = convert_fp32_to_fp16(img)
+    #   points = convert_fp32_to_fp16(points)
+
+    #   with torch.cuda.amp.autocast(enabled=True):
+    #     return original_forward(img, points, metas)
+    #* @auto_fp16是否生效,取决于当前模块是否启用混合精度训练
     @auto_fp16(apply_to=("img", "points"))
     def forward(
         self,

@@ -130,19 +130,22 @@ class CustomResNet(BaseModule):  # TODO: [yz] check param init
             curr_numC = numC_input
             for i in range(len(num_layer)):
                 # 在第一个block中对输入进行downsample
-                layer = [Bottleneck(inplanes=curr_numC, planes=num_channels[i]//4, stride=stride[i],
+                layer = [Bottleneck(inplanes=curr_numC, 
+                                    planes=num_channels[i]//4, stride=stride[i],
                                     downsample=nn.Conv2d(curr_numC, num_channels[i], 3, stride[i], 1),
                                     norm_cfg=norm_cfg)]
                 curr_numC = num_channels[i]
                 layer.extend([Bottleneck(inplanes=curr_numC, planes=num_channels[i]//4, stride=1,
                                          downsample=None, norm_cfg=norm_cfg) for _ in range(num_layer[i] - 1)])
                 layers.append(nn.Sequential(*layer))
+        #* -------------------------------------------------------------#
         # 当前配置默认进入Basic分支；捷径卷积用于匹配通道和空间尺寸。
         # 名称downsample不代表每阶段都减小空间尺寸：stride=1时只匹配通道。
         elif block_type == 'Basic':
             curr_numC = numC_input
             for i in range(len(num_layer)):
                 # 在第一个block中对输入进行downsample
+                # 当前实际使用的捷径分支：downsample=nn.Conv2d(curr_numC, num_channels[i], 3, stride[i], 1) 没有nn.BatchNorm2d归一化
                 layer = [BasicBlock(inplanes=curr_numC, planes=num_channels[i], stride=stride[i],
                                     downsample=nn.Conv2d(curr_numC, num_channels[i], 3, stride[i], 1),
                                     norm_cfg=norm_cfg)]

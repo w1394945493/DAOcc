@@ -42,7 +42,13 @@ from .roiaware_pool3d import (
 )
 # from .points_op import pts_in_boxes3d
 from .sparse_block import SparseBasicBlock, SparseBottleneck, make_sparse_convmodule
-from .voxel import DynamicScatter, Voxelization, dynamic_scatter, voxelization
+from .voxel import (
+    DynamicScatter,
+    Spconv2Voxelization,
+    Voxelization,
+    dynamic_scatter,
+    voxelization,
+)
 
 __all__ = [
     "nms",
@@ -55,6 +61,7 @@ __all__ = [
     "NaiveSyncBatchNorm2d",
     "batched_nms",
     "Voxelization",
+    "Spconv2Voxelization",
     "voxelization",
     "dynamic_scatter",
     "DynamicScatter",

@@ -71,7 +71,9 @@ def main():
         logger.info('[CUSTOM] distributed mode is off!')
         logger.info('-' * 66)
 
-    # set random seeds
+    # 固定三类随机源：Python/NumPy 控制数据增强、CBGS 等随机逻辑，PyTorch
+    # 控制模型初始化及 CPU/CUDA 随机算子。seed 固定只表示随机序列起点固定，
+    # 不等于所有 GPU 算子都能逐位复现；seed=None 时则不主动设置这些随机源。
     if cfg.seed is not None:
         logger.info(
             f"Set random seed to {cfg.seed}, "
@@ -80,6 +82,8 @@ def main():
         random.seed(cfg.seed)
         np.random.seed(cfg.seed)
         torch.manual_seed(cfg.seed)
+        # deterministic=true 时要求 cuDNN 优先选用确定性实现，并关闭基准测试选核。
+        # 自定义 CUDA 算子、spconv 和多卡归约仍可能不具备严格确定性。
         if cfg.deterministic:
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False

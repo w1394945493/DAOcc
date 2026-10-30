@@ -262,6 +262,8 @@ class LoadPointsFromMultiSweeps:
         sweep_points_list = [points]
         ts = results["timestamp"] / 1e6
         if self.pad_empty_sweeps and len(results["sweeps"]) == 0:
+            #* 场景开头没有任何历史 sweep 时，用当前关键帧重复填充。
+            # 此时这些点并不来自真实历史帧，时间差仍为 0。
             for i in range(self.sweeps_num):
                 if self.remove_close:
                     sweep_points_list.append(self._remove_close(points))
@@ -269,10 +271,14 @@ class LoadPointsFromMultiSweeps:
                     sweep_points_list.append(points)
         else:
             if len(results["sweeps"]) <= self.sweeps_num:
+                # 可用历史帧不超过所需数量时，按 info 中由近到远的顺序全部使用。
                 choices = np.arange(len(results["sweeps"]))
             elif self.test_mode:
+                #* 测试模式不随机采样，固定选择时间上距离当前关键帧最近的 N 帧。
                 choices = np.arange(self.sweeps_num)
             else:
+                #* 训练模式下，如果可用历史帧多于 sweeps_num，则从候选历史帧中
+                #* 无放回随机选择 N 帧；因此不保证每次都是时间上最近的 N 帧。
                 # NOTE: seems possible to load frame -11?
                 if not self.load_augmented:
                     choices = np.random.choice(
@@ -295,10 +301,13 @@ class LoadPointsFromMultiSweeps:
                 if self.remove_close:
                     points_sweep = self._remove_close(points_sweep)
                 sweep_ts = sweep["timestamp"] / 1e6
+                # 将历史扫描从其采集时刻的 LiDAR 坐标系变换到当前关键帧
+                # LiDAR 坐标系，使多帧点云能够作为一次网络输入进行拼接。
                 points_sweep[:, :3] = (
                     points_sweep[:, :3] @ sweep["sensor2lidar_rotation"].T
                 )
                 points_sweep[:, :3] += sweep["sensor2lidar_translation"]
+                # 第5维记录该历史扫描相对当前关键帧的时间差；当前帧为0。
                 points_sweep[:, 4] = ts - sweep_ts
                 points_sweep = points.new_point(points_sweep)
                 sweep_points_list.append(points_sweep)

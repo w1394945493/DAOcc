@@ -244,11 +244,15 @@ def _fill_trainval_infos(nusc, train_scenes, val_scenes, test=False, max_sweeps=
             cam_info.update(camera_intrinsics=camera_intrinsics)
             info["cams"].update({cam: cam_info})
 
-        # obtain sweeps for a single key-frame
+        #* 当前 sample 是带标注的关键帧，下面为它收集此前的 LiDAR 历史扫描。
         sd_rec = nusc.get("sample_data", sample["data"]["LIDAR_TOP"])
         sweeps = []
         while len(sweeps) < max_sweeps:
             if not sd_rec["prev"] == "":
+                #* 沿 LIDAR_TOP sample_data 的 prev 链逐帧回溯，没有按
+                #* is_key_frame 过滤。因此历史 sweeps 通常包含关键帧之间的
+                #* 非关键帧，而不是只使用此前的标注关键帧。
+                # 列表按“距离当前帧由近到远”的顺序保存，最多保存 max_sweeps 帧。
                 sweep = obtain_sensor2top(
                     nusc, sd_rec["prev"], l2e_t, l2e_r_mat, e2g_t, e2g_r_mat, "lidar",
                     global2lidar=global2lidar, ego2lidar=l2e_inv_t,

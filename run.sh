@@ -262,22 +262,48 @@ CONFIG=/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3
 PRETRAIN=/home/wangyushen/Data/Weights/daocc/pretrained/resnet50-0676ba61.pth \
 RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_fp32_debug \
 FP32=1 \
-NAN_DEBUG=1 \
-NAN_STOP_ON_ERROR=0 \
 PYTHON=python \
 bash scripts/train_occ3d.sh
 
 # 不启用CGBS策略，总bs=4，训练24个epoch
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 GPUS=2,3 \
+FP32=1 \
 BATCH_SIZE=2 \
 WORKERS=4 \
 MAX_EPOCHS=24 \
 CONFIG=/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_no_cbgs.yaml \
 RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_fp32_no_cbgs \
-FP32=1 \
+
 PYTHON=python \
 bash scripts/train_occ3d.sh
+
+# 启用CGBS策略，验证: "lidar分支全部用spconv2替换,混合精度loss_scale固定为128, GT Heatmap生成等迁移至数据集预处理"改动正确性
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+GPUS=4,5,6,7 \
+BATCH_SIZE=4 \
+WORKERS=4 \
+MAX_EPOCHS=6 \
+CONFIG=/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_fixed_s128.yaml \
+RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_fp16_fixed_s128 \
+PYTHON=python \
+bash scripts/train_occ3d.sh
+
+# 第一轮训练至5750步之后,仍然出现NaN,继续寻找原因
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+GPUS=4,5,6,7 \
+BATCH_SIZE=4 \
+WORKERS=4 \
+MAX_EPOCHS=6 \
+NAN_CONSECUTIVE=10 \
+NAN_SAVE_BATCH=1 \
+CONFIG=/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_fixed_s128_nan_debug.yaml \
+RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_fp16_fixed_s128_nan_debug \
+PYTHON=python \
+bash scripts/train_occ3d_nan_debug.sh
 
 # *======================================================================================================#
 # *(10.26) DAOcc：CUDA 12.1 环境配置与验证
@@ -643,3 +669,123 @@ configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_camera_only.yaml \
 --profile-iters 50 \
 --fp32 \
 --output /home/wangyushen/Data/Outputs/daocc/tmp/daocc_camera_only_fp32.json
+
+# 升级mmdet3d.ops.spconv 至 spconv2.x
+python -m pip install "spconv-cu120==2.3.6" -i https://pypi.tuna.tsinghua.edu.cn/simple
+python -m pip install "spconv-cu120==2.3.6" -i https://mirrors.aliyun.com/pypi/simple/
+
+# 安装后检查，确保不是同一模块
+python - <<'PY'
+import torch
+import spconv
+import spconv.pytorch as spconv2
+import cumm
+
+print("PyTorch:", torch.__version__)
+print("PyTorch CUDA:", torch.version.cuda)
+print("spconv:", spconv.__version__)
+print("spconv path:", spconv.__file__)
+print("cumm:", cumm.__version__)
+
+from mmdet3d.ops import spconv as old_spconv
+
+print("旧版 mmdet3d spconv:", old_spconv.__file__)
+print("新版 spconv 2.x:", spconv2.__file__)
+print("是否为同一个模块:", old_spconv is spconv2)
+PY
+# 再做一次 GPU 运算检查：
+python - <<'PY'
+import torch
+import spconv.pytorch as spconv
+
+features = torch.randn(4, 8, device="cuda")
+indices = torch.tensor(
+    [[0, 0, 0, 0],
+     [0, 0, 1, 1],
+     [0, 1, 0, 1],
+     [0, 1, 1, 0]],
+    dtype=torch.int32,
+    device="cuda",
+)
+
+x = spconv.SparseConvTensor(
+    features=features,
+    indices=indices,
+    spatial_shape=[2, 2, 2],
+    batch_size=1,
+)
+
+layer = spconv.SubMConv3d(8, 16, 3, padding=1).cuda()
+y = layer(x)
+
+print("GPU:", torch.cuda.get_device_name())
+print("输出特征:", y.features.shape)
+print("测试通过")
+PY
+
+# 训练测速
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+/home/wangyushen/miniforge3/envs/daocc-cu121/bin/python \
+tools/profile_train_stages.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel.yaml \
+--gpu 0 \
+--batch-size 2 \
+--workers 4 \
+--warmup-iters 10 \
+--profile-iters 50 \
+--output /home/wangyushen/Data/Outputs/daocc/tmp/daocc_spconv2_voxel_fp16.json
+
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+/home/wangyushen/miniforge3/envs/daocc-cu121/bin/python \
+tools/profile_train_stages.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel.yaml \
+--gpu 0 \
+--batch-size 2 \
+--workers 4 \
+--warmup-iters 10 \
+--profile-iters 50 \
+--fp32 \
+--output /home/wangyushen/Data/Outputs/daocc/tmp/daocc_spconv2_voxel_fp32.json
+
+# 验证旧版本spconv和spconv2.x两种体素化以及新旧backbone输出结果物理坐标系是否一致
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+CUDA_VISIBLE_DEVICES=0 \
+PYTHONPATH=$PWD \
+/home/wangyushen/miniforge3/envs/daocc-cu121/bin/python \
+tools/validate_spconv2_coordinate_system.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_fixed_s128.yaml \
+--gpu 0 \
+--sample-index 0 \
+--history-sweeps 9 \
+--seed 0 \
+--output-dir /home/wangyushen/Data/Outputs/daocc/spconv2_coordinate_validation
+
+# 寻找混合精度训练时报NaN原因
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+/home/wangyushen/miniforge3/envs/daocc-cu121/bin/python \
+tools/debug_fp16_nan.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin.yaml \
+--gpu 0 \
+--batch-size 1 \
+--workers 2 \
+--max-iters 100 \
+--save-batch \
+--output-dir /home/wangyushen/Data/Outputs/daocc/fp16_nan_debug
+
+# (10.30) 继续探究lidar 历史帧聚合 作为输入 → 体素化 → lidar backbone处理流程
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+/home/wangyushen/miniforge3/envs/daocc-cu121/bin/python \
+tools/visualize_spconv2_lidar_pipeline.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_fixed_s128.yaml \
+--gpu 0 \
+--num-samples 20 \
+--warmup-iters 3 \
+--history-sweeps 9 \
+--checkpoint /home/wangyushen/Data/Weights/daocc/occ3d_nus_w_mask/epoch_6.pth \
+--visualize \
+--output-dir /home/wangyushen/Data/Outputs/daocc/outputs/spconv2_lidar_visualization

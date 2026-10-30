@@ -84,7 +84,7 @@ model:
           mode: bilinear
           align_corners: false
       vtransform:
-        type: BEVTransformV2
+        type: BEVTransformV2 # 使用BEVTransformV2做图像特征 → BEV特征的变换
         top_type: lidar
         x: [-54.0, 54.0]
         y: [-54.0, 54.0]

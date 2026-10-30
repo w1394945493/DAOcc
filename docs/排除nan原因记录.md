@@ -1,5 +1,5 @@
 
-训练命令：
+<!-- 训练命令： -->
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 
@@ -15,7 +15,7 @@ RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_fp16_fixe
 PYTHON=python \
 bash scripts/train_occ3d_nan_debug.sh
 
-第一个epoch训练中，出现NaN，经分析，并非损失溢出，最早记录到异常的层是：
+<!-- 第一个epoch训练中，出现NaN，经分析，并非损失溢出，最早记录到异常的层是：
 module.decoder.neck.conv.1.running_mean
 module.decoder.neck.conv.1.running_var
 对应/home/wangyushen/forks/CUDA-DAOcc/DAOcc/mmdet3d/models/backbones/second.py
@@ -25,4 +25,4 @@ module.decoder.neck.conv.1.running_var
 2. 先测试仅将 FPN_LSS 强制FP32。
 3. 若仍溢出，再将 CustomResNet + FPN_LSS 强制FP32。
 4. 根据激活范数结果判断是否为捷径增加BN。
-5. 最后比较原FP32、局部FP32混合精度、增加捷径归一化三种方案的稳定性和mIoU。
+5. 最后比较原FP32、局部FP32混合精度、增加捷径归一化三种方案的稳定性和mIoU。 -->

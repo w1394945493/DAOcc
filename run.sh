@@ -307,7 +307,7 @@ bash scripts/train_occ3d_nan_debug.sh
 
 #* 先验证，FP32下，使用spconv2替换原来lidar体素化+lidar backbone是否可行
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
-GPUS=4,5,6,7 \
+GPUS=1,5,6,7 \
 BATCH_SIZE=4 \
 WORKERS=4 \
 MAX_EPOCHS=6 \
@@ -809,3 +809,18 @@ configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_fixed_s128.yaml
 --checkpoint /home/wangyushen/Data/Weights/daocc/occ3d_nus_w_mask/epoch_6.pth \
 --visualize \
 --output-dir /home/wangyushen/Data/Outputs/daocc/outputs/spconv2_lidar_visualization
+
+# 图像分支BEV特征生成，可视化
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+/home/wangyushen/miniforge3/envs/daocc-cu121/bin/python \
+tools/visualize_camera_bev_pipeline.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_fixed_s128.yaml \
+--gpu 0 \
+--num-samples 10 \
+--warmup-iters 3 \
+--history-sweeps 9 \
+--checkpoint /home/wangyushen/Data/Weights/daocc/occ3d_nus_w_mask/epoch_6.pth \
+--visualize \
+--output-dir /home/wangyushen/Data/Outputs/daocc/outputs/camera_bev_visualization

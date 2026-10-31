@@ -20,6 +20,14 @@ python tools/create_data.py \
   --extra-tag nuscenes \
   --occ3d-root /home/wys/wangyushen/data/Datasets/nuscenes/gts
 
+#* BIT 服务器
+python tools/create_data.py \
+  nuscenes \
+  --root-path /public/home/xiess261023/wangyushen/Data/Datasets/nuscenes/v1.0-trainval \
+  --version v1.0 \
+  --out-dir /public/home/xiess261023/wangyushen/Data/Datasets/nuscenes/anns/daocc \
+  --extra-tag nuscenes \
+  --occ3d-root /public/home/xiess261023/wangyushen/Data/Datasets/nuscenes/gts
 
 #* ----------------------------------------
 # * ININ-3090 NuScenes
@@ -305,6 +313,7 @@ RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_fp16_fixe
 PYTHON=python \
 bash scripts/train_occ3d_nan_debug.sh
 
+#* -------------------------------------------------------------------------#
 #* 先验证，FP32下，使用spconv2替换原来lidar体素化+lidar backbone是否可行
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 GPUS=1,5,6,7 \
@@ -323,6 +332,40 @@ FP32=1 \
 PYTHON=python \
 bash scripts/train_occ3d.sh
 
+#* BIT服务器
+conda activate daocc-cu121
+cd /public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc
+GPUS=0,1,2,3 \
+BATCH_SIZE=4 \
+WORKERS=4 \
+MAX_EPOCHS=6 \
+LOG_INTERVAL=50 \
+CHECKPOINT_INTERVAL=1 \
+EVAL_INTERVAL=1 \
+MAX_KEEP_CKPT=1 \
+DATA=/public/home/xiess261023/wangyushen/Data \
+CONFIG=/public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_bit_spconv2_voxel.yaml \
+PRETRAIN=/public/home/xiess261023/wangyushen/Data/Weights/pretrained/resnet50-0676ba61.pth \
+RUN_DIR=/public/home/xiess261023/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_fp32_debug \
+FP32=1 \
+PYTHON=python \
+bash scripts/train_occ3d.sh
+
+# BIT服务器：评估
+conda activate daocc-cu121
+cd /public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=$PWD \
+python -m torch.distributed.run \
+--standalone \
+--nnodes=1 \
+--nproc_per_node=4 \
+tools/test.py \
+/public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_bit_spconv2_voxel.yaml \
+/public/home/xiess261023/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_fp32_debug/epoch_1.pth \
+--dist \
+--launcher pytorch \
+--eval bbox \
+--eval-options jsonfile_prefix=None
 
 
 # *======================================================================================================#

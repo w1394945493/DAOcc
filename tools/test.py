@@ -7,7 +7,7 @@ import warnings
 import mmcv
 import torch
 from torchpack.utils.config import configs
-from torchpack import distributed as dist
+# from torchpack import distributed as dist # (10.31) 避免通过TorchPack的dist.init()初始化MPI
 from mmcv import Config, DictAction
 from mmcv.cnn import fuse_conv_bn
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
@@ -200,12 +200,18 @@ def install_prediction_writer(model, data_loader, out_dir):
 
 def main():
     args = parse_args()
+    # if args.dist:
+    #     dist.init()
+    # 改为使用 MMCV 已经导入的 init_dist：
     if args.dist:
-        dist.init()
-
+        init_dist(args.launcher, backend="nccl")
+    
     torch.backends.cudnn.benchmark = True
     if args.dist:
-        torch.cuda.set_device(dist.local_rank())
+        # torch.cuda.set_device(dist.local_rank())
+        # 设置当前 GPU 的部分也改成 MMCV/PyTorch 的 local rank：
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
     else:
         torch.cuda.set_device(0)
 

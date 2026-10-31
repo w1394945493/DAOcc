@@ -8,7 +8,7 @@
 from mmcv.cnn import build_norm_layer
 from mmcv.runner import auto_fp16
 from torch import nn
-
+from einops import rearrange
 import spconv.pytorch as spconv
 from mmdet.models import BACKBONES
 
@@ -271,5 +271,9 @@ class SparseEncoderSpconv2(nn.Module):
         spatial_features = self.conv_out(x).dense()
         # spconv2 dense() 返回 [N,C,D,H,W]，将高度 D 折叠到通道维。
         n, c, d, h, w = spatial_features.shape
-        return spatial_features.reshape(n, c * d, h, w)
+        
+        return spatial_features.reshape(n, c * d, h, w).permute(0,1,3,2).contiguous()  # 最后返回 [N,C*D,W,H]
+
+        
+        
 

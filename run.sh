@@ -336,7 +336,7 @@ bash scripts/train_occ3d.sh
 conda activate daocc-cu121
 cd /public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc
 GPUS=0,1,2,3 \
-BATCH_SIZE=4 \
+BATCH_SIZE=2 \
 WORKERS=4 \
 MAX_EPOCHS=6 \
 LOG_INTERVAL=50 \
@@ -346,7 +346,7 @@ MAX_KEEP_CKPT=1 \
 DATA=/public/home/xiess261023/wangyushen/Data \
 CONFIG=/public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_bit_spconv2_voxel.yaml \
 PRETRAIN=/public/home/xiess261023/wangyushen/Data/Weights/pretrained/resnet50-0676ba61.pth \
-RUN_DIR=/public/home/xiess261023/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_fp32_debug \
+RUN_DIR=/public/home/xiess261023/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_fp32 \
 FP32=1 \
 PYTHON=python \
 bash scripts/train_occ3d.sh

@@ -9,8 +9,8 @@ dataset_root: /public/home/xiess261023/wangyushen/Data/Datasets/nuscenes/v1.0-tr
 # 指定该目录后，不再使用系统自动创建的/tmp/tmpxxxx临时目录；各任务配置中的
 # evaluation.interval仍负责控制评估频率。后续评估会覆盖同名结果文件。
 evaluation:
-  jsonfile_prefix: /public/home/xiess261023/wangyushen/Data/Outputs/tmp
-
+  interval: 2 # 控制验证频率
+  jsonfile_prefix: /public/home/xiess261023/wangyushen/Data/Outputs/tmp # 指定 nuScenes 检测评估结果 JSON 文件的输出目录或路径前缀。
 # (3) 更换设备后需要修改的路径：
 #* 新生成的 pkl 已包含各样本的 occ3d.occ_path，无需在训练配置中重复指定 gts。
 #* train 外层沿用 CBGSDataset，因此训练标注路径位于 data.train.dataset 下。
@@ -245,5 +245,4 @@ lr_config:
 
 max_epochs: 6
 
-evaluation:
-  interval: 2
+

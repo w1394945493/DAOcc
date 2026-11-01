@@ -301,7 +301,7 @@ class BEVFusion(Base3DFusionModel):
                     lidar_aug_matrix,
                     metas,
                     **kwargs,
-                )
+                ) # (1 1280 180 180)
             elif sensor == "lidar":
                 feature = self.extract_lidar_features(points)
             else:
@@ -318,7 +318,7 @@ class BEVFusion(Base3DFusionModel):
         # ConvFuser：通道拼接1536 → 3×3卷积/BN/ReLU → 512通道。
         # 未配置fuser时仅允许单模态输入；当前双模态配置会执行融合。
         if self.fuser is not None:
-            x = self.fuser(features)
+            x = self.fuser(features) # (1 512 180 180)
         else:
             assert len(features) == 1, features
             x = features[0]

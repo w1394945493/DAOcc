@@ -13,7 +13,15 @@ WORKERS=${WORKERS:-4}
 MAX_EPOCHS=${MAX_EPOCHS:-6}  # 总轮数，不是恢复后额外增加的轮数。
 DATA=${DATA:-/home/wangyushen/Data}
 CONFIG=${CONFIG:-$PROJECT_ROOT/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin.yaml}
+# 相机/双模态训练默认加载 ResNet-50；LiDAR-only 设置 PRETRAIN=None。
+# None 表示配置中不存在相机 encoder，脚本不会再注入任何
+# model.encoders.camera.* 覆盖项。不能只留空，因为 ${PRETRAIN:-默认值}
+# 会把空字符串重新替换为默认路径。
 PRETRAIN=${PRETRAIN:-$DATA/Weights/daocc/pretrained/resnet50-0676ba61.pth}
+CAMERA_PRETRAIN_ENABLED=1
+if [[ $PRETRAIN == None ]]; then
+    CAMERA_PRETRAIN_ENABLED=0
+fi
 RUN_DIR=${RUN_DIR:-$DATA/Outputs/daocc/w_mask/train}
 PYTHON=${PYTHON:-python}  # 先激活 DAOcc 环境，或指定该环境的 Python 绝对路径。
 
@@ -126,7 +134,12 @@ CMD+=(--nnodes="$NNODES" --nproc_per_node="$NPROC_PER_NODE"
 
 if [[ -n $RESUME_FROM ]]; then
     # 恢复时无需再次加载 ResNet 预训练文件；完整模型由 runner.resume 恢复。
-    CMD+=(--resume_from "$RESUME_FROM" --model.encoders.camera.backbone.init_cfg None)
+    CMD+=(--resume_from "$RESUME_FROM")
+    # Camera-only/双模态关闭初始化，避免恢复后再次读取ResNet文件；
+    # LiDAR-only没有camera配置，因此不能注入这条嵌套覆盖项。
+    if (( CAMERA_PRETRAIN_ENABLED )); then
+        CMD+=(--model.encoders.camera.backbone.init_cfg None)
+    fi
     echo "恢复训练：$RESUME_FROM"
     resolved=$(readlink -f -- "$RESUME_FROM")
     name=${resolved##*/}
@@ -147,12 +160,23 @@ else
     OTHER_WEIGHTS=("$RUN_DIR"/*.pth)
     (( ${#OTHER_WEIGHTS[@]} == 0 )) || fail '目录中有权重，但没有 epoch_N.pth 或有效 latest.pth；无法自动恢复完整训练状态'
     if [[ $LOAD_FROM != None ]]; then
-        CMD+=(--resume_from None --model.encoders.camera.backbone.init_cfg None)
+        CMD+=(--resume_from None)
+        # 仅在配置包含相机encoder时覆盖其init_cfg；LiDAR-only跳过。
+        if (( CAMERA_PRETRAIN_ENABLED )); then
+            CMD+=(--model.encoders.camera.backbone.init_cfg None)
+        fi
         echo "仅加载模型权重（不恢复优化器和轮数）：$LOAD_FROM"
     else
-        [[ -f $PRETRAIN ]] || fail "预训练权重不存在：$PRETRAIN"
-        CMD+=(--resume_from None --model.encoders.camera.backbone.init_cfg.checkpoint "$PRETRAIN")
-        echo "从预训练权重开始：$PRETRAIN"
+        CMD+=(--resume_from None)
+        if (( CAMERA_PRETRAIN_ENABLED )); then
+            [[ -f $PRETRAIN ]] || fail "预训练权重不存在：$PRETRAIN"
+            CMD+=(--model.encoders.camera.backbone.init_cfg.checkpoint "$PRETRAIN")
+            echo "从相机预训练权重开始：$PRETRAIN"
+        else
+            # LiDAR-only配置没有camera encoder，从随机初始化的LiDAR分支、
+            # decoder和heads开始训练，不访问或注入ResNet预训练参数。
+            echo '相机预训练：关闭（PRETRAIN=None，适用于LiDAR-only）'
+        fi
     fi
 fi
 

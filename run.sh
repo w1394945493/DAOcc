@@ -68,7 +68,7 @@ python tools/visualize.py \
   --bbox-thickness 2 \
   --data.workers_per_gpu 2
 
-#* ----------------------------------------
+#* ------------------------------------------------------------
 # * ININ-3090 NuScenes
 cd /home/wys/wangyushen/forks/DAOcc
 python tools/visualize.py \
@@ -332,6 +332,46 @@ FP32=1 \
 PYTHON=python \
 bash scripts/train_occ3d.sh
 
+#* 仅相机输入
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+GPUS=2,3,6,7 \
+BATCH_SIZE=2 \
+WORKERS=4 \
+MAX_EPOCHS=6 \
+LOG_INTERVAL=50 \
+CHECKPOINT_INTERVAL=1 \
+EVAL_INTERVAL=1 \
+MAX_KEEP_CKPT=1 \
+DATA=/home/wangyushen/Data \
+CONFIG=/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_camera_only.yaml \
+PRETRAIN=/home/wangyushen/Data/Weights/daocc/pretrained/resnet50-0676ba61.pth \
+RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_camera_only \
+FP32=1 \
+PYTHON=python \
+bash scripts/train_occ3d.sh
+
+#* 仅Lidar输入
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+GPUS=2,3,6,7 \
+BATCH_SIZE=2 \
+WORKERS=4 \
+MAX_EPOCHS=6 \
+LOG_INTERVAL=50 \
+CHECKPOINT_INTERVAL=1 \
+EVAL_INTERVAL=1 \
+MAX_KEEP_CKPT=1 \
+DATA=/home/wangyushen/Data \
+CONFIG=/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_lidar_only.yaml \
+PRETRAIN=None \
+RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_lidar_only \
+FP32=1 \
+PYTHON=python \
+bash scripts/train_occ3d.sh
+
+#* -------------------------------------------------------------------------#
 #* BIT服务器
 conda activate daocc-cu121
 cd /public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc
@@ -366,6 +406,26 @@ tools/test.py \
 --launcher pytorch \
 --eval bbox \
 --eval-options jsonfile_prefix=None
+
+#* BIT服务器 仅相机输入
+conda activate daocc-cu121
+cd /public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc
+GPUS=0,1,2,3 \
+BATCH_SIZE=2 \
+WORKERS=4 \
+MAX_EPOCHS=6 \
+LOG_INTERVAL=50 \
+CHECKPOINT_INTERVAL=1 \
+EVAL_INTERVAL=1 \
+MAX_KEEP_CKPT=1 \
+DATA=/home/wangyushen/Data \
+CONFIG=/public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_camera_only.yaml \
+PRETRAIN=/public/home/xiess261023/wangyushen/Data/Weights/pretrained/resnet50-0676ba61.pth \
+RUN_DIR=/public/home/xiess261023/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_camera_only \
+FP32=1 \
+PYTHON=python \
+bash scripts/train_occ3d.sh
+
 
 
 # *======================================================================================================#

@@ -3,6 +3,10 @@
 #* 原始数据根目录用于 nuScenes 数据表读取及检测评估，不能设为 info 输出目录。
 dataset_root: /home/wangyushen/Data/Datasets/Nuscenes/
 
+evaluation:
+  interval: 1
+  jsonfile_prefix: /home/wangyushen/Data/Outputs/tmp
+
 #* 新生成的 pkl 已包含各样本的 occ3d.occ_path，无需在训练配置中重复指定 gts。
 #* train 外层沿用 CBGSDataset，因此训练标注路径位于 data.train.dataset 下。
 data:
@@ -235,5 +239,4 @@ lr_config:
 
 max_epochs: 6
 
-evaluation:
-  interval: 2
+

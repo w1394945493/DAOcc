@@ -25,11 +25,12 @@ fi
 RUN_DIR=${RUN_DIR:-$DATA/Outputs/daocc/w_mask/train}
 PYTHON=${PYTHON:-python}  # 先激活 DAOcc 环境，或指定该环境的 Python 绝对路径。
 
-# 日志、保存与验证频率（单位沿用训练配置：日志为 iteration，保存/验证为 epoch）。
+# 保存/验证单位由配置by_epoch决定；未指定环境变量时沿用YAML中的interval。
 LOG_INTERVAL=${LOG_INTERVAL:-50}
-CHECKPOINT_INTERVAL=${CHECKPOINT_INTERVAL:-1}
-EVAL_INTERVAL=${EVAL_INTERVAL:-1}
-MAX_KEEP_CKPT=${MAX_KEEP_CKPT:-1}  # 普通权重和 EMA 权重各自保留的数量。
+CHECKPOINT_INTERVAL=${CHECKPOINT_INTERVAL:-}
+EVAL_INTERVAL=${EVAL_INTERVAL:-}
+MAX_ITERS=${MAX_ITERS:-}  # 仅新Runner支持；与epoch预算取较小值。
+MAX_KEEP_CKPT=${MAX_KEEP_CKPT:-1}  # epoch模式分别保留；iter模式EMA内嵌，只保留一组文件。
 LOAD_FROM=${LOAD_FROM:-None}  # 仅加载模型权重；自动恢复 checkpoint 时优先 resume_from。
 EMA_RESUME=${EMA_RESUME:-None}  # 显式指定 EMA 优先于自动匹配同轮文件。
 
@@ -83,8 +84,11 @@ for gpu in "${GPU_LIST[@]}"; do
 done
 NUM_GPUS=${#GPU_LIST[@]}
 NPROC_PER_NODE=${NPROC_PER_NODE:-$NUM_GPUS}
-for param in LOG_INTERVAL CHECKPOINT_INTERVAL EVAL_INTERVAL NNODES NPROC_PER_NODE MASTER_PORT; do
+for param in LOG_INTERVAL NNODES NPROC_PER_NODE MASTER_PORT; do
     [[ ${!param} =~ ^[1-9][0-9]*$ ]] || fail "$param 必须为正整数"
+done
+for param in CHECKPOINT_INTERVAL EVAL_INTERVAL MAX_ITERS; do
+    [[ -z ${!param} || ${!param} =~ ^[1-9][0-9]*$ ]] || fail "$param 必须为空或正整数"
 done
 [[ $MAX_KEEP_CKPT =~ ^[1-9][0-9]*$ ]] || fail 'MAX_KEEP_CKPT 必须为正整数'
 [[ $STANDALONE =~ ^[01]$ ]] || fail 'STANDALONE 必须为 0 或 1'
@@ -100,23 +104,30 @@ done
 [[ $LOAD_FROM == None || -f $LOAD_FROM ]] || fail "LOAD_FROM 不存在：$LOAD_FROM"
 [[ $EMA_RESUME == None || -f $EMA_RESUME ]] || fail "EMA_RESUME 不存在：$EMA_RESUME"
 
-# 数字排序，避免 epoch_9 排在 epoch_10 后面；排除 *_ema.pth / best_*.pth。
-RESUME_FROM=''
-LAST_EPOCH=-1
+# 显式RESUME_FROM优先，其次latest，再按数字寻找epoch/iter断点。
+# 新旧模式请使用不同RUN_DIR；新Runner会拒绝缺少轮内元数据的旧断点。
+RESUME_FROM=${RESUME_FROM:-}
 shopt -s nullglob
-for checkpoint in "$RUN_DIR"/epoch_*.pth; do
-    name=${checkpoint##*/}
-    if [[ -f $checkpoint && $name =~ ^epoch_([0-9]+)\.pth$ ]]; then
-        epoch=$((10#${BASH_REMATCH[1]}))
-        if (( epoch > LAST_EPOCH )); then
-            LAST_EPOCH=$epoch
-            RESUME_FROM=$checkpoint
-        fi
-    fi
-done
-# 兼容只保留 latest.pth 的目录；断开的软链接不作为有效 checkpoint。
-if [[ -z $RESUME_FROM && -f $RUN_DIR/latest.pth ]]; then
+if [[ -n $RESUME_FROM ]]; then
+    [[ -f $RESUME_FROM ]] || fail "RESUME_FROM不存在：$RESUME_FROM"
+elif [[ -f $RUN_DIR/latest.pth ]]; then
     RESUME_FROM=$RUN_DIR/latest.pth
+else
+    LAST_STEP=-1
+    checkpoint_kind=''
+    for checkpoint in "$RUN_DIR"/epoch_*.pth "$RUN_DIR"/iter_*.pth; do
+        name=${checkpoint##*/}
+        if [[ -f $checkpoint && $name =~ ^(epoch|iter)_([0-9]+)\.pth$ ]]; then
+            kind=${BASH_REMATCH[1]}
+            step=$((10#${BASH_REMATCH[2]}))
+            [[ -z $checkpoint_kind || $checkpoint_kind == "$kind" ]] || fail '目录混有epoch/iter断点，请显式指定RESUME_FROM'
+            checkpoint_kind=$kind
+            if (( step > LAST_STEP )); then
+                LAST_STEP=$step
+                RESUME_FROM=$checkpoint
+            fi
+        fi
+    done
 fi
 
 CMD=("$PYTHON" -m "$DISTRIBUTED_MODULE")
@@ -129,8 +140,11 @@ CMD+=(--nnodes="$NNODES" --nproc_per_node="$NPROC_PER_NODE"
     "$TRAIN_SCRIPT" "$CONFIG" --launcher "$LAUNCHER" --run-dir "$RUN_DIR"
     --data.samples_per_gpu "$BATCH_SIZE" --data.workers_per_gpu "$WORKERS"
     --max_epochs "$MAX_EPOCHS" --log_config.interval "$LOG_INTERVAL"
-    --checkpoint_config.interval "$CHECKPOINT_INTERVAL" --evaluation.interval "$EVAL_INTERVAL"
     --max_keep_ckpt "$MAX_KEEP_CKPT" --load_from "$LOAD_FROM")
+
+[[ -z $CHECKPOINT_INTERVAL ]] || CMD+=(--checkpoint_config.interval "$CHECKPOINT_INTERVAL")
+[[ -z $EVAL_INTERVAL ]] || CMD+=(--evaluation.interval "$EVAL_INTERVAL")
+[[ -z $MAX_ITERS ]] || CMD+=(--runner.max_iters "$MAX_ITERS")
 
 if [[ -n $RESUME_FROM ]]; then
     # 恢复时无需再次加载 ResNet 预训练文件；完整模型由 runner.resume 恢复。
@@ -147,7 +161,10 @@ if [[ -n $RESUME_FROM ]]; then
     if [[ $name =~ ^epoch_([0-9]+)\.pth$ ]]; then
         EMA_FROM="$(dirname -- "$resolved")/epoch_${BASH_REMATCH[1]}_ema.pth"
     fi
-    if [[ $EMA_RESUME != None ]]; then
+    if [[ $name =~ ^iter_([0-9]+)\.pth$ ]]; then
+        [[ $EMA_RESUME == None ]] || fail 'iter断点已内嵌EMA，请勿另设EMA_RESUME'
+        echo 'EMA：从迭代断点内部同步恢复'
+    elif [[ $EMA_RESUME != None ]]; then
         echo "恢复指定 EMA：$EMA_RESUME"
     elif [[ -n $EMA_FROM && -f $EMA_FROM ]]; then
         EMA_RESUME=$EMA_FROM
@@ -158,7 +175,7 @@ if [[ -n $RESUME_FROM ]]; then
 else
     # 若目录只有 EMA 或其他命名的权重，不静默开始新训练覆盖原有输出。
     OTHER_WEIGHTS=("$RUN_DIR"/*.pth)
-    (( ${#OTHER_WEIGHTS[@]} == 0 )) || fail '目录中有权重，但没有 epoch_N.pth 或有效 latest.pth；无法自动恢复完整训练状态'
+    (( ${#OTHER_WEIGHTS[@]} == 0 )) || fail '目录中有权重，但没有 epoch_N.pth、iter_N.pth 或有效 latest.pth；无法自动恢复完整训练状态'
     if [[ $LOAD_FROM != None ]]; then
         CMD+=(--resume_from None)
         # 仅在配置包含相机encoder时覆盖其init_cfg；LiDAR-only跳过。

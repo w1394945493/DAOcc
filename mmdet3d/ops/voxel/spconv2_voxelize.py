@@ -104,7 +104,7 @@ class Spconv2Voxelization(nn.Module):
     def forward(self, points):
         max_voxels = self.max_voxels[0] if self.training else self.max_voxels[1]
         generator = self._get_generator(points, max_voxels)
-        voxels, coordinates_zyx, num_points = generator(points)
+        voxels, coordinates_zyx, num_points = generator(points) # 共同描述点云体素化结果 # (105288 10 5)：各维度含义：非空体素数量，每个体素最多保存点数，每个点特征维数 (105288 3) (105288)
 
         # spconv2 [z,y,x] -> DAOcc 既有接口 [x,y,z]。BEVFusion 随后只需
         # 像原实现一样在最前面补 batch 索引，不影响任何下游模块。

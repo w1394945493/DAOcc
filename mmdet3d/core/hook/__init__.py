@@ -6,3 +6,4 @@ from .syncbncontrol import SyncbnControlHook
 
 __all__ = ['MEGVIIEMAHook', 'SequentialControlHook', 'is_parallel',
            'SyncbnControlHook']
+from .iteration_training import ResumableCheckpointHook, ResumableEMAHook

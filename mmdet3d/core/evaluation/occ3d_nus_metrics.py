@@ -138,6 +138,7 @@ class Metric_mIoU():
 
         """
         self.cnt += 1
+        #* 评估时同时过滤GT和预测：掩码内：预测正确或错误都会影响指标；掩码外：预测什么都不影响 Occ 指标；
         if self.use_image_mask:
             masked_semantics_gt = semantics_gt[mask_camera]     # (N_valid, )
             masked_semantics_pred = semantics_pred[mask_camera]     # (N_valid, )

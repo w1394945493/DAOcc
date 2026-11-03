@@ -165,10 +165,11 @@ class NuScenesDatasetOccupancy(NuScenesDataset):
                 raise NotImplementedError
         else:  # mIoU
             if self.data_type == 'occ3d':
+                #* Occ3D 的实际评估只统计 mask_camera=True 的体素，掩码外不参与 IoU/mIoU 计算。
                 self.occ_eval_metrics = Metric_mIoU(
                     num_classes=18,
                     use_lidar_mask=False,
-                    use_image_mask=True)
+                    use_image_mask=True) #* 只统计mask_camera=True的体素，掩码外不参与IoU/mIoU计算
 
                 print('\nStarting Evaluation...')
                 for index, occ_pred in enumerate(tqdm(occ_results)):

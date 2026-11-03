@@ -230,12 +230,14 @@ optimizer_config:
 
 # warmup 结束后，按照余弦退火逐渐降低学习率。
 # min_lr_ratio: 1e-3 表示余弦退火的理论目标最小学习率为：2e-4 × 1e-3 = 2e-7
+# MMCV默认按epoch调整学习率：训练最初500步：学习率线性增加；预热结束后：每个epoch开始时，根据余弦公式更新一次，统一epoch内保持不变
 lr_config:
   policy: CosineAnnealing
   warmup: linear
   warmup_iters: 500
   warmup_ratio: 0.33333333
   min_lr_ratio: 1.0e-3
+  # by_epoch: false       # 每个iteration更新余弦学习率；默认为true
 
 max_epochs: 6
 

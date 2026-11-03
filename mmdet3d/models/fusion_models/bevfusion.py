@@ -342,7 +342,9 @@ class BEVFusion(Base3DFusionModel):
                 #* 3D预测Head
                 if head_type == "object": #* "object"
                     pred_dict = head(x, metas)
+                    
                     '''
+                    # ---------------------------------------------------------------------------------#
                     # 在下一行 losses = head.loss(...) 设置断点（必须在执行 loss 前，此时 pred_dict 已生成）。
                     # 选择当前 forward_single 栈帧，复制下面完整 exec(...) 到 VSCode 调试控制台。
                     # 不要复制外层三单引号。只保存 PNG 图片，保存在 out_dir 下的独立时间戳目录。

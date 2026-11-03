@@ -1,0 +1,11 @@
+框架参考：/home/wangyushen/forks/GaussianFormer/model/head/localagg
+参考实现声明为仅限非商业研究/评估用途；复制保留了源文件中的原版权声明。
+
+DAOcc改动：
+1. 输出完整规则体素特征[B,128,Z,Y,X]，不直接生成二维BEV。
+2. 固定特征通道由18改为128。
+3. 标量立方包围盒改为XYZ各向异性半径。
+4. 使用w=opacity*exp(-0.5*d^2)，支持sigma椭球截断。
+5. 支持normalized与sum聚合。
+6. CUDA backward返回center、opacity、feature和precision梯度；precision由
+   rotation/scale在PyTorch中构造，梯度继续传回rotation和scale。

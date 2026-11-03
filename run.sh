@@ -371,6 +371,74 @@ FP32=1 \
 PYTHON=python \
 bash scripts/train_occ3d.sh
 
+
+
+GPUS=2,3,6,7 \
+BATCH_SIZE=2 \
+WORKERS=4 \
+MAX_EPOCHS=6 \
+LOG_INTERVAL=50 \
+CHECKPOINT_INTERVAL=1 \
+EVAL_INTERVAL=1 \
+MAX_KEEP_CKPT=1 \
+DATA=/home/wangyushen/Data \
+CONFIG=/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_depth_lss.yaml \
+PRETRAIN=None \
+RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_depth_lss \
+FP32=1 \
+PYTHON=python \
+bash scripts/train_occ3d.sh
+
+#* -----------------------------------
+#* 评估
+# lidar only
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=2,3,6,7 PYTHONPATH=$PWD \
+python -m torch.distributed.run \
+--standalone \
+--nnodes=1 \
+--nproc_per_node=4 \
+tools/test.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_lidar_only.yaml \
+/home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_lidar_only/epoch_6.pth \
+--dist \
+--launcher pytorch \
+--cfg-options fp16=None \
+--out-dir /home/wangyushen/Data/Outputs/daocc/occ_predictions/lidar_only
+
+# camera only
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=2,3,6,7 PYTHONPATH=$PWD \
+python -m torch.distributed.run \
+--standalone \
+--nnodes=1 \
+--nproc_per_node=4 \
+tools/test.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_camera_only.yaml \
+/home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_camera_only/epoch_6.pth \
+--dist \
+--launcher pytorch \
+--cfg-options fp16=None \
+--out-dir /home/wangyushen/Data/Outputs/daocc/occ_predictions/camera_only
+
+# camera & lidar fusion
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=2,3,6,7 PYTHONPATH=$PWD \
+python -m torch.distributed.run \
+--standalone \
+--nnodes=1 \
+--nproc_per_node=4 \
+tools/test.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel.yaml \
+/home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_fp32/epoch_6.pth \
+--dist \
+--launcher pytorch \
+--cfg-options fp16=None \
+--out-dir /home/wangyushen/Data/Outputs/daocc/occ_predictions/camera_lidar_fusion
+
 #* -------------------------------------------------------------------------#
 #* BIT服务器
 conda activate daocc-cu121
@@ -419,13 +487,12 @@ CHECKPOINT_INTERVAL=1 \
 EVAL_INTERVAL=1 \
 MAX_KEEP_CKPT=1 \
 DATA=/home/wangyushen/Data \
-CONFIG=/public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_camera_only.yaml \
+CONFIG=/public/home/xiess261023/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_bit_spconv2_voxel_camera_only.yaml \
 PRETRAIN=/public/home/xiess261023/wangyushen/Data/Weights/pretrained/resnet50-0676ba61.pth \
 RUN_DIR=/public/home/xiess261023/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_camera_only \
 FP32=1 \
 PYTHON=python \
 bash scripts/train_occ3d.sh
-
 
 
 # *======================================================================================================#
@@ -927,3 +994,131 @@ configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_fixed_s128.yaml
 --checkpoint /home/wangyushen/Data/Weights/daocc/occ3d_nus_w_mask/epoch_6.pth \
 --visualize \
 --output-dir /home/wangyushen/Data/Outputs/daocc/outputs/camera_bev_visualization
+
+# 初始高斯锚点构建
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+/home/wangyushen/miniforge3/envs/daocc-cu121/bin/python \
+tools/build_initial_gaussian_anchors.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel.yaml \
+--gpu 0 \
+--num-samples 20 \
+--num-gaussians 1200 \
+--history-sweeps 9 \
+--warmup-iters 3 \
+--splat-sigma 3.0 \
+--splat-accumulation normalized \
+--splat-implementation cuda \
+--checkpoint /home/wangyushen/Data/Weights/daocc/occ3d_nus_w_mask/epoch_6.pth \
+--visualize \
+--output-dir /home/wangyushen/Data/Outputs/daocc/outputs/initial_gaussian_anchors_cuda
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+/home/wangyushen/miniforge3/envs/daocc-cu121/bin/python \
+tools/build_initial_gaussian_anchors.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel.yaml \
+--gpu 0 \
+--num-samples 20 \
+--num-gaussians 1200 \
+--history-sweeps 9 \
+--warmup-iters 3 \
+--splat-sigma 3.0 \
+--splat-accumulation normalized \
+--splat-implementation pytorch \
+--checkpoint /home/wangyushen/Data/Weights/daocc/occ3d_nus_w_mask/epoch_6.pth \
+--visualize \
+--output-dir /home/wangyushen/Data/Outputs/daocc/outputs/initial_gaussian_anchors_pytorch
+
+#* ------------------------------------------------------------
+# 可视化比较 Camera Only，Lidar Only和 Camera + Lidar的结果
+# 默认从验证集均匀选20帧；--scene-index 0 --all-frames 可保存指定场景全部帧。
+# 默认热力图独立归一化，用于比较空间结构；加 --feature-scale shared 使用共享色标。
+
+# 表示：从验证集场景索引0开始，选择连续5个场景，每个场景均匀选10帧，共50帧。
+# - --scene-index：起始场景索引，从0开始；不写默认从0开始。
+# - --num-scenes：选择多少个场景。
+# - --num-samples：每个场景选多少帧；不足时取该场景全部帧，不重复。
+# - 此时不要加 --all-frames，否则会保存所选场景的全部帧。
+# --camera-mask： 只显示 mask_camera 有效范围内的占据体素。没有有效占据的位置留白。
+
+# 3D框参数
+# --box-score-thr 0.3  # 修改显示阈值
+# --box-labels         # 标注类别和分数
+# --no-boxes           # 关闭检测框
+
+# 可视化视频
+# --video-dir /home/wangyushen/Data/Outputs/daocc/outputs/modality_comparison/videos \
+# --video-fps 2
+
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+python tools/visualize_modality_comparison.py \
+--camera-config configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_camera_only.yaml \
+--camera-checkpoint /home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_camera_only/epoch_6.pth \
+--lidar-config configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_lidar_only.yaml \
+--lidar-checkpoint /home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_lidar_only/epoch_6.pth \
+--fusion-config configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel.yaml \
+--fusion-checkpoint /home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_fp32/epoch_6.pth \
+--gpu 0 \
+--scene-index 10 \
+--num-scenes 5 \
+--num-samples 20 \
+--camera-mask \
+--output-dir /home/wangyushen/Data/Outputs/daocc/outputs/modality_comparison \
+--video-dir /home/wangyushen/Data/Outputs/daocc/outputs/modality_comparison/videos \
+--video-fps 2
+
+#* ------------------------------------------------------------
+# (11.02) 进一步分析占用预测结果：包括混淆矩阵等分析
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+PYTHONPATH=$PWD \
+python tools/analyze_occ_fusion.py \
+--pred-root /home/wangyushen/Data/Outputs/daocc/occ_predictions \
+--gt-root /home/wangyushen/Data/Datasets/nuscenes_anns/gts \
+--output-dir /home/wangyushen/Data/Outputs/daocc/occ_analysis
+
+#* ------------------------------------------------------------
+# (11.02) 可视化DepthLSS相机BEV和LiDAR分支BEV。
+# --checkpoint： 可选是否加载权重
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+python tools/visualize_depth_lss_bev.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_depth_lss.yaml \
+--checkpoint /home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_depth_lss/epoch_3.pth \
+--gpu 0 \
+--scene-index 0 \
+--num-scenes 5 \
+--num-samples 2 \
+--output-dir /home/wangyushen/Data/Outputs/daocc/outputs/depth_lss_bev_train
+
+#* ----------------------------------------------------------#
+# 测试按迭代步数保存权重、评估可行性
+# 使用 daocc_occ3d_nus_w_mask_inin_spconv2_voxel_depth_lss_iter.yaml 时：
+# CHECKPOINT_INTERVAL：每隔多少个全局 iteration 保存一次模型。
+# EVAL_INTERVAL：每隔多少个全局 iteration 评估一次模型。
+# iteration 按 batch 计数，跨 epoch 累计；训练结束时额外保证保存和评估。
+# MAX_EPOCHS 仍控制总训练轮数。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+GPUS=4,5 \
+BATCH_SIZE=2 \
+WORKERS=4 \
+MAX_EPOCHS=6 \
+LOG_INTERVAL=50 \
+CHECKPOINT_INTERVAL=2000 \
+EVAL_INTERVAL=4000 \
+MAX_KEEP_CKPT=1 \
+DATA=/home/wangyushen/Data \
+CONFIG=configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_depth_lss_iter.yaml \
+PRETRAIN=/home/wangyushen/Data/Weights/daocc/pretrained/resnet50-0676ba61.pth \
+RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask//test_iteration_resume \
+FP32=1 \
+PYTHON=python \
+bash scripts/train_occ3d.sh

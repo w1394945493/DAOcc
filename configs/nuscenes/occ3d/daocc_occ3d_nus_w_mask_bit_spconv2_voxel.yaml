@@ -223,7 +223,7 @@ model:
     occ: 1.0
 
 # AdamW: 基础学习率2e-4，前500个iteration使用线性warmup
-# warmup开始时，2e-4/3=6.67e-5，500步内逐步增加到6.67e-5
+# warmup开始时，2e-4/3=6.67e-5，500步内逐步增加到2e-4
 optimizer:
   type: AdamW
   lr: 2.0e-4

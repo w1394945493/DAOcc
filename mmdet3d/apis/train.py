@@ -10,6 +10,10 @@ from mmcv.runner import (
     build_runner,
 )
 from mmdet3d.runner import CustomEpochBasedRunner
+from mmdet3d.runner.resumable_epoch_based_runner import (
+    prepare_resumable_datasets, resumable_loader,
+)
+from mmdet3d.core.hook.iteration_training import IterationEvalHook, IterationDistEvalHook
 
 from mmdet3d.utils import get_root_logger
 from mmdet.core import DistEvalHook, EvalHook
@@ -32,6 +36,12 @@ def train_model(
     # 这里只负责数据侧随机性；是否启用确定性 CUDA 算法由 tools/train.py 设置。
     dataset = dataset if isinstance(dataset, (list, tuple)) else [dataset]
 
+    #* ==================================================================#
+    #* 仅新增Runner启用轮内恢复：必须先恢复CBGS映射，再构建分组采样器。
+    iteration_mode = cfg.runner.type == "ResumableEpochBasedRunner"
+    if iteration_mode:
+        prepare_resumable_datasets(dataset, cfg.get("resume_from"))
+
     data_loaders = [
         build_dataloader(
             ds,
@@ -43,6 +53,9 @@ def train_model(
         )
         for ds in dataset
     ]
+
+    if iteration_mode:
+        data_loaders = [resumable_loader(loader, cfg.seed) for loader in data_loaders]
 
     # put model on gpus
     find_unused_parameters = cfg.get("find_unused_parameters", False)
@@ -233,10 +246,17 @@ def train_model(
             dist=distributed,
             shuffle=False,
         )
-        eval_cfg = cfg.get("evaluation", {})
-        eval_cfg["by_epoch"] = cfg.runner["type"] != "IterBasedRunner"
-        eval_hook = DistEvalHook if distributed else EvalHook
-        runner.register_hook(eval_hook(val_dataloader, **eval_cfg))
+        eval_cfg = dict(cfg.get("evaluation", {}))
+        if iteration_mode:
+            # 按全局iteration评估；评估后恢复train模式，最终不足interval也评估。
+            eval_cfg.setdefault("by_epoch", False)
+            eval_hook = IterationDistEvalHook if distributed else IterationEvalHook
+            runner.register_hook(eval_hook(val_dataloader, **eval_cfg), priority="LOW")
+        else:
+            # 保留原epoch训练入口行为。
+            eval_cfg["by_epoch"] = cfg.runner["type"] != "IterBasedRunner"
+            eval_hook = DistEvalHook if distributed else EvalHook
+            runner.register_hook(eval_hook(val_dataloader, **eval_cfg))
 
     if cfg.resume_from:
         runner.resume(cfg.resume_from)

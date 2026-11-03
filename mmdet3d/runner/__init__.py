@@ -1,1 +1,2 @@
 from .epoch_based_runner import CustomEpochBasedRunner
+from .resumable_epoch_based_runner import ResumableEpochBasedRunner

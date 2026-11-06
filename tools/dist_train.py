@@ -1,3 +1,6 @@
+import setproctitle
+setproctitle.setproctitle("wangyushen")
+
 import argparse
 import copy
 import os

@@ -207,6 +207,7 @@ class BEVTransform(BaseModule):
         #* ================== 6. 高度拼接与 BEV 输出 ==================
         # 形成 BEV：高度 z 与通道 c 拼接，不对高度求和。
         # [B, zs*xs*ys, C] -> [B, zs*C, ys, xs]；180*180*10、C=128 时为 [B,1280,180,180]。
+        # h对应物理Y，w对应物理X，因此是高度拼入通道，并将w放到h前面
         feats_volume = einops.rearrange(feats_volume,
                                         'bs (z h w) c -> bs (z c) w h',
                                         z=self.volume_size[2], h=self.volume_size[0], w=self.volume_size[1])

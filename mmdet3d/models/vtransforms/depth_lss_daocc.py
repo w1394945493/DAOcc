@@ -8,7 +8,7 @@ __all__ = ["DepthLSSTransformDAOcc"]
 
 @VTRANSFORMS.register_module()
 class DepthLSSTransformDAOcc(DepthLSSTransform):
-    """LiDAR深度引导LSS，输出与DAOcc一致的[B, Z*C, Y, X]特征。
+    """LiDAR深度引导LSS，输出与DAOcc一致的[B, Z*C, X, Y]特征。
 
     使用父类的深度编码、深度概率预测和BEV pooling；不改变原类行为。
     此版本仅支持downsample=1，避免父类下采样层按C而非Z*C配置通道。
@@ -48,8 +48,17 @@ class DepthLSSTransformDAOcc(DepthLSSTransform):
             lidar2image, camera_intrinsics, camera2lidar,
             img_aug_matrix, lidar_aug_matrix, metas, **kwargs,
         )
+        
+        #* 3. 保持父类的[X,Y]排列，使融合前两分支索引对应同一物理轴。
+        # 原实现误将DAOcc约定判断为[Y,X]，下面保留旧注释和语句供追溯，禁止执行。
+        # 【旧注释，轴顺序判断有误】将空间轴转换为DAOcc原BEVTransformV2采用的[Y,X]顺序。
+        # 【旧注释】只交换空间轴，不翻转物理坐标，不改变通道内的高度顺序。
+        # 【旧注释】本配置：[B,128*10,180,180]；即使X/Y尺寸相等，也不能省略转置。
+        # return bev.transpose(-1, -2).contiguous()
 
-        #* 3. 将空间轴转换为DAOcc原BEVTransformV2采用的[Y,X]顺序。
-        # 只交换空间轴，不翻转物理坐标，不改变通道内的高度顺序。
-        # 本配置：[B,128*10,180,180]；即使X/Y尺寸相等，也不能省略转置。
-        return bev.transpose(-1, -2).contiguous()
+        #* BEV pooling输出[B,C,Z,X,Y]，高度拼接后已经是[B,Z*C,X,Y]。
+        # 当前SparseEncoderSpconv2和原BEVTransformV2也输出[X,Y]，无需再次转置。
+        # 例如物理索引(X=130,Y=70)应保留在[...,130,70]；转置会错误移到[...,70,130]。
+        # 两轴都为180时shape不变，但物理位置会错位；contiguous仅整理存储，不交换轴。
+        # Occ head内部的空间轴交换及LiDAR→ego采样仍按原流程执行。
+        return bev.contiguous()

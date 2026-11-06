@@ -296,6 +296,8 @@ def main():
     fp16_cfg = cfg.get("fp16", None)
     if fp16_cfg is not None:
         wrap_fp16_model(model)
+    
+    
     checkpoint = load_checkpoint(model, args.checkpoint, map_location="cpu")
     if args.fuse_conv_bn:
         model = fuse_conv_bn(model)

@@ -47,10 +47,12 @@ def make_sparse_convmodule_spconv2(
         raise TypeError("order 必须是长度不超过 3 的 tuple")
     if not set(order).issubset({"conv", "norm", "act"}):
         raise ValueError(f"order 包含不支持的操作: {order}")
-
+    #*---------------------------------------------------------#
+    #* SubMConv3d:子流形稀疏卷积：专门针对稀疏数据设计的卷积操作，只在输入中已经激活的体素位置计算输出，不会产生新的激活位置
+    #* SparseConv3d: 普通稀疏卷积：输出激活位置可以扩张，原本没有特征的位置也可能被激活。
     conv_classes = {
-        "SubMConv3d": spconv.SubMConv3d,
-        "SparseConv3d": spconv.SparseConv3d,
+        "SubMConv3d": spconv.SubMConv3d, # 普通稀疏卷积：通常用于Backbone的下采样阶段
+        "SparseConv3d": spconv.SparseConv3d, # 子流形稀疏卷积：通常用于相同分辨率的特征提取。实际网络中通常交替使用这样既保持大部分计算的稀疏性，又通过下采样扩大有效感受野。
     }
     if conv_type not in conv_classes:
         raise ValueError(f"当前编码器不支持稀疏卷积类型: {conv_type}")
@@ -151,6 +153,10 @@ class SparseEncoderSpconv2(nn.Module):
         self.fp16_enabled = False
 
         input_order = ("conv",) if self.order[0] != "conv" else self.order
+       
+        
+        #------------------------------------------------#
+        # conv_input	SubMConv3d	3	1	初始特征提取
         self.conv_input = make_sparse_convmodule_spconv2(
             in_channels,
             base_channels,
@@ -161,10 +167,20 @@ class SparseEncoderSpconv2(nn.Module):
             conv_type="SubMConv3d",
             order=input_order,
         )
-
+        #------------------------------------------------#
+        # 位置	                卷积类型	   Kernel Stride	作用
+        # encoder_layer1	    SubMConv3d	    3	 1	       局部特征提取
+        # encoder_layer2 首层	SparseConv3d	3	 2	       下采样
+        # encoder_layer2 其余层	SubMConv3d	    3	 1	       局部特征提取
+        # encoder_layer3 首层	SparseConv3d	3	 2	      下采样
+        # encoder_layer3 其余层	SubMConv3d	    3	 1	       局部特征提取
+        # encoder_layer4 首层	SparseConv3d	3	 2	      下采样
+        # encoder_layer4 其余层	SubMConv3d	    3	 1	       局部特征提取
         encoder_out_channels = self._make_encoder_layers(
             norm_cfg, base_channels, block_type
         )
+        #------------------------------------------------#
+        # conv_out	SparseConv3d	(1,1,3)	(1,1,2)	输出阶段进一步压缩高度维
         self.conv_out = make_sparse_convmodule_spconv2(
             encoder_out_channels,
             output_channels,
@@ -175,8 +191,14 @@ class SparseEncoderSpconv2(nn.Module):
             indice_key="spconv_down2",
             conv_type="SparseConv3d",
         )
+        # Stage 内的 SubMConv 只能在现有激活体素之间传播特征。
+        # Stage 间的 SparseConv 通过下采样扩大感受野，让原本相距较远的体素在低分辨率空间中建立联系。
+        # 最后将稀疏 3D Features 转换为 Dense BEV Features，后续网络也可能继续进行更大范围的特征交互。
+        
 
     def _make_encoder_layers(self, norm_cfg, in_channels, block_type):
+
+        
         self.encoder_layers = spconv.SparseSequential()
 
         for i, blocks in enumerate(self.encoder_channels):
@@ -255,6 +277,7 @@ class SparseEncoderSpconv2(nn.Module):
             voxel_features = voxel_features.float()
 
         coors = coors.int()
+        #----------------------------------------------------#
         # DAOcc 坐标 [batch,x,y,z] -> spconv2 [batch,z,y,x]。
         coors_spconv2 = coors[:, [0, 3, 2, 1]].contiguous()
         input_sp_tensor = spconv.SparseConvTensor(
@@ -262,13 +285,23 @@ class SparseEncoderSpconv2(nn.Module):
             coors_spconv2,
             self.sparse_shape_spconv2,
             int(batch_size),
-        )
-
+        ) # 输入：[B,16,1440,1440,41]
+        #----------------------------------------------------#
+        # 稀疏卷积 
+        # 输入 + conv_input [B,16,1440,1440,41]
+        # Stage 1： 2 BasicBlocks → SparseConv ↓2 → [B,32,720,720,21]
+        # Stage 2： 2 BasicBlocks → SparseConv ↓2 → [B,64,360,360,11]
+        # Stage 3： 2 BasicBlocks → SparseConv ↓2 → [B,128,180,180,5]
+        # Stage 4： 2 BasicBlocks → [B,128,180,180,5]
+        # conv_out + BEV  [B,128,180,180,2] → [B,256,180,180]
+        # 说明：中间稀疏张量的实际存储形式为 features: [N_active,C] 和 indices: [N_active,4]；图中的 [B,C,X,Y,Z] 是逻辑网格形状，并非实际稠密存储。
         x = self.conv_input(input_sp_tensor)
         for encoder_layer in self.encoder_layers:
             x = encoder_layer(x)
-
+        # 执行.dense() 后，将稀疏存储的特征转换为完整的稠密网格张量。.dense() 之前：SparseConvTensor 数据以稀疏形式存储
+        # spconv2 的稠密张量维度顺序是 [B, C, Z, Y, X]，而不是 [B, C, X, Y, Z]。
         spatial_features = self.conv_out(x).dense()
+        
         # spconv2 dense() 返回 [N,C,D,H,W]，将高度 D 折叠到通道维。
         n, c, d, h, w = spatial_features.shape
         return spatial_features.reshape(n, c * d, h, w).permute(0,1,3,2).contiguous()  # 最后返回 [N,C*D,W,H]

@@ -1,30 +1,22 @@
-# * 显式继承完整单帧配置，避免依赖新目录祖先的 default.yaml。
+#* 由 tools/temporal_daocc.py 显式加载完整单帧基础配置，原文件不修改。
 base_config: ../nuscenes/occ3d/daocc_occ3d_nus_w_mask_custom.yaml
-
 dataset_type: TemporalNuScenesDataset
-# ! 与 BEVDet4D 一致的 range(start, stop, step)：默认只取前1帧。
-# [1,9,1] 可加载前1～8帧；当前模型融合头仍仅支持单历史，勿直接用于多帧训练。
-# multi_adj_frame_id_cfg: [1, 2, 1]
-multi_adj_frame_id_cfg: [1, 4, 1] # 加载前1，2，3帧历史帧
+#* range(start,stop,step)：默认前1关键帧；[1,4,1] 为前1、2、3帧。
+# 改历史数量会改变融合卷积输入通道，旧时序 checkpoint 不能直接续训。
+multi_adj_frame_id_cfg: [1, 2, 1]
 model:
   type: TemporalDAOcc
   temporal:
     channels: 512
-    #* （temporal) ema：无新增可学习参数，在线缓存保存融合后的 BEV。
-    # 原可学习门控方案保留供后续对照：mode: gate
-    mode: ema
-    # （temporal) alpha 为历史保留权重；0.5 表示当前与对齐历史各占一半。
-    alpha: 0.5
-    # 原始 decoder BEV 范围，不是最终 occupancy 的 [-40,40] 范围。
+    num_history: ${len(range(*multi_adj_frame_id_cfg))}
     bounds: [-54.0, -54.0, 54.0, 54.0]
-    max_time_gap: 1.0
-
+    # 不额外限制时间窗口；跨场景、非历史帧仍屏蔽。
+    max_time_gap: null
 data:
   train:
     dataset:
       temporal_mode: pair
       multi_adj_frame_id_cfg: ${multi_adj_frame_id_cfg}
-      # ! null：与 BEVDet4D 一样不按时间差额外筛选；模型融合仍有自己的时间保护。
       max_time_gap: null
   val:
     temporal_mode: pair

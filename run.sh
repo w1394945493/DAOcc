@@ -1,6 +1,7 @@
+pip install setproctitle --proxy http://127.0.0.1:17891
+
 
 conda activate daocc
-
 # 准备构建及界面依赖，保留当前 NumPy。
 python -m pip install \
   "numpy==1.22.0" "vtk==9.2.6" \
@@ -372,8 +373,10 @@ PYTHON=python \
 bash scripts/train_occ3d.sh
 
 
-
-GPUS=2,3,6,7 \
+#* (11.05) 使用depth lss替换原DAOcc的BEVTransformV2
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+GPUS=1,3,6,7 \
 BATCH_SIZE=2 \
 WORKERS=4 \
 MAX_EPOCHS=6 \
@@ -384,7 +387,7 @@ MAX_KEEP_CKPT=1 \
 DATA=/home/wangyushen/Data \
 CONFIG=/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_depth_lss.yaml \
 PRETRAIN=None \
-RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_depth_lss \
+RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_depth_lss_2 \
 FP32=1 \
 PYTHON=python \
 bash scripts/train_occ3d.sh
@@ -558,6 +561,7 @@ torch.cuda.synchronize()
 print("GPU 运算通过:", torch.cuda.get_device_name(0), y.shape)
 PYTORCH_CHECK
 
+#*======================================================================#
 # 4. 先安装构建工具，再单独编译 MMCV。
 # MMCV_WITH_OPS=1 启用扩展；--no-binary 强制源码构建；MAX_JOBS 控制内存占用。
 # --no-build-isolation 使用当前环境的 torch/CUDA，不另建依赖版本不同的构建环境。
@@ -1091,12 +1095,44 @@ cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
 python tools/visualize_depth_lss_bev.py \
 configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_depth_lss.yaml \
---checkpoint /home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_depth_lss/epoch_3.pth \
+--checkpoint /home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_depth_lss/epoch_6.pth \
 --gpu 0 \
---scene-index 0 \
+--scene-index 10 \
 --num-scenes 5 \
---num-samples 2 \
---output-dir /home/wangyushen/Data/Outputs/daocc/outputs/depth_lss_bev_train
+--num-samples 20 \
+--camera-mask \
+--output-dir /home/wangyushen/Data/Outputs/daocc/outputs/depth_lss_bev
+
+# (11.05) 可视化原方法：使用BEVTransformV2相机BEV和Lidar BEV
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+python tools/visualize_daocc_bev.py \
+configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel.yaml \
+--checkpoint /home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_fp32/epoch_6.pth \
+--gpu 0 \
+--scene-index 10 \
+--num-scenes 5 \
+--num-samples 20 \
+--camera-mask \
+--output-dir /home/wangyushen/Data/Outputs/daocc/outputs/bevtransformv2_bev
+
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+python tools/visualize_daocc_depth_lss_comparison.py \
+--daocc-config configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel.yaml \
+--checkpoint /home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_fp32/epoch_6.pth \
+--depth-lss-config configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_depth_lss.yaml \
+--checkpoint /home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_depth_lss/epoch_6.pth \
+--gpu 0 \
+--scene-index 10 \
+--num-scenes 5 \
+--num-samples 20 \
+--camera-mask \
+--feature-scale independent \
+--output-dir /home/wangyushen/Data/Outputs/daocc/outputs/daocc_depth_lss_comparison/imgs \
+--video-dir /home/wangyushen/Data/Outputs/daocc/outputs/daocc_depth_lss_comparison/videos \
+--video-fps 2
 
 #* ----------------------------------------------------------#
 # 测试按迭代步数保存权重、评估可行性

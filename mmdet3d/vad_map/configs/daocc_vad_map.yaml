@@ -1,0 +1,51 @@
+#* 用 python -m mmdet3d.vad_map.run 加载此叠加配置，不能直接交给原 tools/train.py。
+# 保留原单帧 DAOcc；可通过入口 --base-config 换成本机其他完整单帧配置。
+base_config: ../../../configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin.yaml
+#* 第一版使用 FP32；只改变扩展配置，不改变原 default.yaml。
+fp16: null
+dataset_type: VADMapNuScenesDataset
+vector_map_classes: [divider, ped_crossing, boundary]
+# 按 LiDAR x,y 定义局部地图范围，与 108m BEV范围分开。
+vector_map_bounds: [-30.0, -15.0, 30.0, 15.0]
+vector_map_points: 20
+model:
+  type: DAOccVADMap
+  vector_map_loss_weight: 1.0
+  vector_map_head:
+    type: VADVectorMapHead
+    in_channels: 512
+    #* 直接卷积预测，不使用Transformer或Query。
+    hidden_channels: 128
+    max_predictions: 100
+    num_points: ${vector_map_points}
+    num_classes: ${len(vector_map_classes)}
+    gaussian_radius: 1
+    collision_radius: 2
+    nms_kernel: 3
+    bev_bounds: [-54.0, -54.0, 54.0, 54.0]
+    map_bounds: ${vector_map_bounds}
+    heatmap_weight: 1.0
+    offset_weight: 1.0
+    pts_weight: 1.0
+    dir_weight: 0.005
+    score_threshold: 0.05
+data:
+  train:
+    dataset:
+      type: VADMapNuScenesDataset
+      vector_map:
+        classes: ${vector_map_classes}
+        bounds: ${vector_map_bounds}
+        num_points: ${vector_map_points}
+  val:
+    type: VADMapNuScenesDataset
+    vector_map:
+      classes: ${vector_map_classes}
+      bounds: ${vector_map_bounds}
+      num_points: ${vector_map_points}
+  test:
+    type: VADMapNuScenesDataset
+    vector_map:
+      classes: ${vector_map_classes}
+      bounds: ${vector_map_bounds}
+      num_points: ${vector_map_points}

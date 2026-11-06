@@ -47,7 +47,7 @@ model:
       backbone:
         type: SparseEncoderSpconv2 # 使用独立的官方 spconv 2.x 实现；原 SparseEncoder 和原配置不变。
         in_channels: 5
-        sparse_shape: [ 1440, 1440, 41 ]
+        sparse_shape: [ 1440, 1440, 41 ] # 输入体素网格尺寸：1440x1440x41
         output_channels: 128
         order:
           - conv

@@ -35,8 +35,7 @@ class TemporalNuScenesDataset(NuScenesDatasetOccupancy):
         if max_time_gap is not None and max_time_gap <= 0:
             raise ValueError('max_time_gap 应为正数或 None')
         self.history_offsets = list(range(start, stop, step))
-        if temporal_mode == 'stream' and self.history_offsets != [1]:
-            raise ValueError('当前流式缓存仅支持前1帧；多偏移加载请使用 pair 模式')
+
 
 
         # 仅在已加载的 self.data_infos 中选择关键帧，不从 LiDAR sweeps 中选择。
@@ -104,26 +103,22 @@ class TemporalNuScenesDataset(NuScenesDatasetOccupancy):
         if current is None:
             return None
         meta = self.get_temporal_metadata(index)
-        if self.temporal_mode == 'pair':
-            #! 用初始化时确定的映射查历史，与上个 batch 或上次可视化了哪帧无关。
-            # 原单历史读取方式：
-            # prev = self.previous.get(index)
-            # history = self._single(prev, training) if prev is not None else None
-            histories, history_meta, validity = [], [], []
-            for prev, valid in zip(self.history_indices[index], self.history_valid[index]):
+        #* 成对与缓存推理共享相同历史索引、token、顺序和有效性；缓存模式不读历史输入。
+        histories, history_meta, validity = [], [], []
+        for prev, valid in zip(self.history_indices[index], self.history_valid[index]):
+            if self.temporal_mode == 'pair':
                 history = self._single(prev, training) if valid else None
                 valid = valid and history is not None
                 histories.append(history if valid else dict(current))
-                history_meta.append(self.get_temporal_metadata(prev) if valid else dict(meta))
-                validity.append(valid)
-            #! 单历史保持原有字典接口；多历史为列表，槽位顺序对应 history_offsets。
-            # 固定槽位及占位数据保证不同样本能被 mmcv.collate 正确组成 batch。
-            single = len(histories) == 1
-            current['history'] = histories[0] if single else histories
-            meta['history'] = history_meta[0] if single else history_meta
-            meta['history_valid'] = validity[0] if single else validity
-            meta['history_offsets'] = self.history_offsets
-            meta['history_indices'] = self.history_indices[index]
+            history_meta.append(self.get_temporal_metadata(prev) if valid else dict(meta))
+            validity.append(valid)
+        if self.temporal_mode == 'pair':
+            # 始终返回固定长度列表，单历史也不例外，便于批处理及多帧统一处理。
+            current['history'] = histories
+        meta['history'] = history_meta
+        meta['history_valid'] = validity
+        meta['history_offsets'] = self.history_offsets
+        meta['history_indices'] = self.history_indices[index]
         current['temporal_meta'] = DataContainer(meta, cpu_only=True)
         return current
 

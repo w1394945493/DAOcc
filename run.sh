@@ -373,7 +373,7 @@ PYTHON=python \
 bash scripts/train_occ3d.sh
 
 
-#* (11.05) 使用depth lss替换原DAOcc的BEVTransformV2
+#* (11.05) 使用depth lss替换原DAOcc的BEVTransformV2 - (未训完)
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 GPUS=1,3,6,7 \
@@ -391,6 +391,8 @@ RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask/train_spconv2_voxel_depth_lss
 FP32=1 \
 PYTHON=python \
 bash scripts/train_occ3d.sh
+
+
 
 #* -----------------------------------
 #* 评估
@@ -1143,18 +1145,18 @@ python tools/visualize_daocc_depth_lss_comparison.py \
 # MAX_EPOCHS 仍控制总训练轮数。
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
-GPUS=4,5 \
+GPUS=2,3 \
 BATCH_SIZE=2 \
 WORKERS=4 \
 MAX_EPOCHS=6 \
 LOG_INTERVAL=50 \
-CHECKPOINT_INTERVAL=2000 \
-EVAL_INTERVAL=4000 \
+CHECKPOINT_INTERVAL=7000 \
+EVAL_INTERVAL=7000 \
 MAX_KEEP_CKPT=1 \
 DATA=/home/wangyushen/Data \
-CONFIG=configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_depth_lss_iter.yaml \
+CONFIG=configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_iter.yaml \
 PRETRAIN=/home/wangyushen/Data/Weights/daocc/pretrained/resnet50-0676ba61.pth \
-RUN_DIR=/home/wangyushen/Data/Outputs/daocc/w_mask//test_iteration_resume \
+RUN_DIR=/home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_iter \
 FP32=1 \
 PYTHON=python \
 bash scripts/train_occ3d.sh

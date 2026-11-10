@@ -251,7 +251,7 @@ def train_model(
             # 按全局iteration评估；评估后恢复train模式，最终不足interval也评估。
             eval_cfg.setdefault("by_epoch", False)
             eval_hook = IterationDistEvalHook if distributed else IterationEvalHook
-            runner.register_hook(eval_hook(val_dataloader, **eval_cfg), priority="LOW")
+            runner.register_hook(eval_hook(val_dataloader, **eval_cfg), priority="LOW") # 评估优先级设置为LOW
         else:
             # 保留原epoch训练入口行为。
             eval_cfg["by_epoch"] = cfg.runner["type"] != "IterBasedRunner"

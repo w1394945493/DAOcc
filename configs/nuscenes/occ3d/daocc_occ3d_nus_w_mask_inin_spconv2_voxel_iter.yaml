@@ -220,7 +220,8 @@ model:
 # warmup开始时，2e-4/3=6.67e-5，500步内逐步增加到6.67e-5
 optimizer:
   type: AdamW
-  lr: 2.0e-4
+  # lr: 2.0e-4
+  lr: 1.0e-4
   weight_decay: 0.01
 
 optimizer_config:

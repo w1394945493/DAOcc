@@ -21,3 +21,7 @@ Service: sshd
 
 <!-- 之前残留、不再需要的 SSH 连接，直接执行： -->
 kill 3458744
+
+<!-- git -->
+git config --local http.proxy http://127.0.0.1:17891
+git push

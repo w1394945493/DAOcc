@@ -11,9 +11,11 @@ class BEVRefineNet(nn.Module):
         super().__init__()
         self.bottleneck = nn.Sequential(
             nn.Conv2d(channels, internal_channels, 1),
-            nn.BatchNorm2d(internal_channels), nn.ReLU(),
+            nn.BatchNorm2d(internal_channels), 
+            nn.ReLU(),
             nn.Conv2d(internal_channels, internal_channels, 3, padding=1),
-            nn.BatchNorm2d(internal_channels), nn.ReLU(),
+            nn.BatchNorm2d(internal_channels), 
+            nn.ReLU(),
             nn.Conv2d(internal_channels, channels, 1),
             nn.BatchNorm2d(channels))
         self.avg_pool = nn.AdaptiveAvgPool2d(1)

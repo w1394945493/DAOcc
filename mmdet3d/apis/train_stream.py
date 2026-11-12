@@ -11,20 +11,9 @@ from mmdet.datasets.builder import worker_init_fn
 from mmdet3d.utils import get_root_logger
 
 
-def prepare_streaming_config(cfg):
-    """Called before model/dataset construction, only by opted-in training entries."""
-    if not cfg.get('streaming', {}).get('enabled', False):
-        return cfg
-    # Lazy registration: original configurations do not import stream modules.
-    from mmdet3d.datasets.nuscenes_sequence_dataset import NuScenesSequenceDataset
+def prepare_streaming_model_config(cfg):
+    """Configure the streaming model without requiring training data or a runner."""
     from mmdet3d.models.fusion_models.streaming_bevfusion import StreamingBEVFusion
-    train_cfg = deepcopy(cfg.data.train)
-    if train_cfg.get('type') == 'CBGSDataset':
-        train_cfg = deepcopy(train_cfg['dataset'])
-    if train_cfg.get('type') not in ('NuScenesDatasetOccupancy', 'NuScenesSequenceDataset'):
-        raise ValueError('Streaming requires an unwrapped nuScenes occupancy dataset')
-    train_cfg.update(type='NuScenesSequenceDataset', filter_empty_gt=False, resample=False)
-    cfg.data.train = train_cfg
     if cfg.model.type not in ('BEVFusion', 'StreamingBEVFusion'):
         raise ValueError('Streaming adapter requires the DAOcc BEVFusion model')
     cfg.model.type = 'StreamingBEVFusion'
@@ -39,6 +28,25 @@ def prepare_streaming_config(cfg):
     #* (11.12) 可选 StreamOcc 风格历史修正与拼接融合，旧配置默认关闭。
     fusion_cfg = dict(cfg.streaming.get('history_fusion', {}))
     cfg.model.history_fusion = fusion_cfg if fusion_cfg.pop('enabled', False) else None
+    return cfg
+
+
+def prepare_streaming_config(cfg):
+    """Called before model/dataset construction, only by opted-in training entries."""
+    if not cfg.get('streaming', {}).get('enabled', False):
+        return cfg
+    # Lazy registration: original configurations do not import stream modules.
+    from mmdet3d.datasets.nuscenes_sequence_dataset import NuScenesSequenceDataset
+    from mmdet3d.models.fusion_models.streaming_bevfusion import StreamingBEVFusion
+    train_cfg = deepcopy(cfg.data.train)
+    if train_cfg.get('type') == 'CBGSDataset':
+        train_cfg = deepcopy(train_cfg['dataset'])
+    if train_cfg.get('type') not in ('NuScenesDatasetOccupancy', 'NuScenesSequenceDataset'):
+        raise ValueError('Streaming requires an unwrapped nuScenes occupancy dataset')
+    train_cfg.update(type='NuScenesSequenceDataset', filter_empty_gt=False, resample=False)
+    cfg.data.train = train_cfg
+    #* (11.12) 训练与独立评估共用流式模型配置。
+    prepare_streaming_model_config(cfg)
     if cfg.runner.type != 'IterBasedRunner':
         raise ValueError('Streaming requires runner.type=IterBasedRunner')
     # Torchpack recursively merges default.yaml, including its max_epochs key.
@@ -69,12 +77,13 @@ def build_stream_dataloader(dataset, cfg, distributed):
     )
 
 
-def build_stream_val_dataloader(cfg, distributed):
+def build_stream_val_dataloader(cfg, distributed, split="val"):
     """Training-time validation, same BS=1 contract as StreamOcc."""
     from mmdet3d.datasets import build_dataset
     from mmdet3d.datasets.nuscenes_sequence_dataset import NuScenesSequenceDataset
     from mmdet3d.datasets.samplers import SceneDistributedSampler
-    val_cfg = deepcopy(cfg.data.val)
+    #* (11.12) 独立评估复用同一序列加载器，但读取 data.test。
+    val_cfg = deepcopy(cfg.data[split])
     batch_size = val_cfg.pop('samples_per_gpu', 1)
     if batch_size != 1:
         raise ValueError('StreamOcc-style validation requires samples_per_gpu=1')

@@ -201,6 +201,9 @@ def install_prediction_writer(model, data_loader, out_dir):
         if len(indices) != len(outputs):
             raise ValueError("Prediction count does not match current batch indices")
         for index, prediction in zip(indices, outputs):
+            #* (11.12) 流式采样器传递带序列元数据的请求，使用原数据集索引保存。
+            if isinstance(index, dict):
+                index = index['idx']
             output_path = paths[index]
             mmcv.mkdir_or_exist(os.path.dirname(output_path))
             # 先写本进程临时文件再原子替换，避免中断留下半个 pkl。
@@ -260,6 +263,19 @@ def main():
 
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+    #* (11.12) 独立流式评估复用训练中的模型与序列配置，普通评估路径保持不变。
+    streaming = cfg.get('streaming', {}).get('enabled', False)
+    if streaming:
+        from mmdet3d.apis.train_stream import prepare_streaming_model_config, build_stream_val_dataloader
+        from mmdet3d.apis.stream_test import stream_test
+        if args.show or args.show_dir or args.gpu_collect:
+            raise ValueError('Streaming evaluation supports metrics/save-predictions and CPU collection only')
+        if not isinstance(cfg.data.test, dict):
+            raise ValueError('Streaming evaluation requires one sequence dataset')
+        if cfg.data.test.get('samples_per_gpu', 1) != 1:
+            raise ValueError('Streaming evaluation requires data.test.samples_per_gpu=1')
+        prepare_streaming_model_config(cfg)
+        cfg.seed = args.seed
     # set cudnn_benchmark
     if cfg.get("cudnn_benchmark", False):
         torch.backends.cudnn.benchmark = True
@@ -301,15 +317,19 @@ def main():
         set_random_seed(args.seed, deterministic=args.deterministic)
 
     # build the dataloader
-    dataset = build_dataset(cfg.data.test)
-    data_loader = build_dataloader(
-        dataset,
-        samples_per_gpu=samples_per_gpu,
-        workers_per_gpu=cfg.data.workers_per_gpu,
-        num_gpus=None if distributed else 1,
-        dist=distributed,
-        shuffle=False,
-    )
+    if streaming:
+        data_loader = build_stream_val_dataloader(cfg, distributed, split='test')
+        dataset = data_loader.dataset
+    else:
+        dataset = build_dataset(cfg.data.test)
+        data_loader = build_dataloader(
+            dataset,
+            samples_per_gpu=samples_per_gpu,
+            workers_per_gpu=cfg.data.workers_per_gpu,
+            num_gpus=None if distributed else 1,
+            dist=distributed,
+            shuffle=False,
+        )
 
     # build the model and load checkpoint
     cfg.model.train_cfg = None
@@ -319,7 +339,8 @@ def main():
         wrap_fp16_model(model)
     
     
-    checkpoint = load_checkpoint(model, args.checkpoint, map_location="cpu")
+    #* (11.12) 流式评估严格加载，避免缺少融合权重时用随机参数生成指标。
+    checkpoint = load_checkpoint(model, args.checkpoint, map_location="cpu", strict=streaming)
     if args.fuse_conv_bn:
         model = fuse_conv_bn(model)
     # old versions did not save class info in checkpoints, this walkaround is
@@ -329,7 +350,10 @@ def main():
     else:
         model.CLASSES = dataset.CLASSES
 
-    if not distributed:
+    #* (11.12) 流式各卡序列长度可不同，直接本地前向，避免 DDP 同步等待。
+    if streaming:
+        model = model.cuda()
+    elif not distributed:
         model = MMDataParallel(model, device_ids=[0])
         # 原调用保留在下方统一执行，先完成模型包装再安装逐帧保存钩子。
         # outputs = single_gpu_test(model, data_loader)
@@ -343,7 +367,9 @@ def main():
     # 仅显式启用 --save-predictions 时保存每帧预测；--out-dir 本身只控制评估输出目录。
     writer = install_prediction_writer(model, data_loader, args.out_dir) if args.save_predictions else None
     try:
-        if not distributed:
+        if streaming:
+            outputs = stream_test(model, data_loader, args.tmpdir)
+        elif not distributed:
             outputs = single_gpu_test(model, data_loader)
         else:
             outputs = multi_gpu_test(model, data_loader, args.tmpdir, args.gpu_collect)
@@ -378,6 +404,8 @@ def main():
                 "gpu_collect",
                 "save_best",
                 "rule",
+                "by_epoch",
+                "evaluate_last",
             ]:
                 eval_kwargs.pop(key, None)
             eval_kwargs.update(dict(metric=args.eval, **kwargs))

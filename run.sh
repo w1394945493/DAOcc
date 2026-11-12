@@ -1307,7 +1307,7 @@ CUDA_VISIBLE_DEVICES=0,2 torchrun \
   tools/dist_train.py \
   configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
   --launcher pytorch \
-  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_daocc/w_mask \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_daocc/w_mask/stream \
   --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
   --data.samples_per_gpu "$BATCH_SIZE" \
   --data.workers_per_gpu "$NUM_WORKERS" \
@@ -1317,3 +1317,56 @@ CUDA_VISIBLE_DEVICES=0,2 torchrun \
   --log_config.interval 50 \
   --optimizer.lr 2.0e-4 \
   --checkpoint_config.max_keep_ckpts 1
+
+# 验证是否由于流式训练流程本身导致训练出现NaN  
+# --streaming.history_fusion.enabled False \
+# --streaming.bev_warp.enabled False \
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+CUDA_VISIBLE_DEVICES=0,2 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_cache_only \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --streaming.history_fusion.enabled False \
+  --streaming.bev_warp.enabled False \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1 
+
+#* 评估
+CUDA_VISIBLE_DEVICES=0 python tools/test.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  /你的路径/iter_xxx.pth \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/outputs/stream_eval \
+  --cfg-options \
+  streaming.history_fusion.enabled=False \
+  streaming.bev_warp.enabled=False
+
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0,2 torchrun \
+  --standalone \
+  --nproc_per_node=2 \
+  tools/test.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  /你的路径/iter_xxx.pth \
+  --dist \
+  --launcher pytorch \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/outputs/stream_eval

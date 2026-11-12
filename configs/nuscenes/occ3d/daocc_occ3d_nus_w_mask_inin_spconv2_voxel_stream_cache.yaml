@@ -1,0 +1,245 @@
+# Independent sequence-training configuration, copied from the sibling spconv2_voxel baseline.
+# Entry prepares the inherited CBGS child as NuScenesSequenceDataset (no CBGS).
+# DAOcc prediction heads consume BEV features fused with aligned history.
+# 21096 steps is an explicit example budget (~6 passes at 28130 frames/global batch 8).
+# Override runner.max_iters for your actual batch/world size. No implicit epoch schedule.
+# Resume restores weights/optimizer/iteration, restarts sequence sampling with empty cache.
+# Runtime BEV alignment, history fusion and EMA saving are enabled.
+dataset_root: /home/wangyushen/Data/Datasets/Nuscenes/
+evaluation:
+  interval: 2000
+  jsonfile_prefix: /home/wangyushen/Data/Outputs/tmp
+  by_epoch: false
+  evaluate_last: true
+data:
+  samples_per_gpu: 1
+  workers_per_gpu: 2
+  train:
+    dataset:
+      #* (11.12) 与 StreamOcc 主训练配置一致：每个 scene 切成两个连续子序列。
+      # prepare_streaming_config 解开 CBGS 包装时，将此参数一并传给序列 Dataset。
+      sequences_split_num: 2
+      #* (11.12) StreamOcc 同名开关：true 子序列内几何增强一致，false 每帧独立增强。
+      keep_consistent_seq_aug: true
+      ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_train.pkl
+  val:
+    #* (11.12) 与 StreamOcc 训练中验证一致：每卡 BS=1，完整连续序列，不切训练子序列。
+    samples_per_gpu: 1
+    sequences_split_num: 1
+    ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_val.pkl
+  test:
+    ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_val.pkl
+voxel_size: [0.075, 0.075, 0.2]
+point_cloud_range: [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+augment3d:
+  scale: [1.0, 1.0]
+  rotate: [-0.0, 0.0]
+  translate: 0.0
+model:
+  type: BEVFusion
+  encoders:
+    lidar:
+      voxelize:
+        type: Spconv2Voxelization
+        max_num_points: 10
+        point_cloud_range: ${point_cloud_range}
+        voxel_size: ${voxel_size}
+        max_voxels: [120000, 160000]
+      backbone:
+        type: SparseEncoderSpconv2
+        in_channels: 5
+        sparse_shape: [1440, 1440, 41]
+        output_channels: 128
+        order: [conv, norm, act]
+        encoder_channels: [[16, 16, 32], [32, 32, 64], [64, 64, 128], [128, 128]]
+        encoder_paddings: [[0, 0, 1], [0, 0, 1], [0, 0, [1, 1, 0]], [0, 0]]
+        block_type: basicblock
+    camera:
+      backbone:
+        type: ResNet
+        depth: 50
+        out_indices: [1, 2, 3]
+        init_cfg:
+          type: Pretrained
+          checkpoint: /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth
+      neck:
+        type: GeneralizedLSSFPN
+        in_channels: [512, 1024, 2048]
+        out_channels: 256
+        start_level: 0
+        num_outs: 3
+        norm_cfg:
+          type: BN2d
+          requires_grad: true
+        act_cfg:
+          type: ReLU
+          inplace: true
+        upsample_cfg:
+          mode: bilinear
+          align_corners: false
+      vtransform:
+        type: BEVTransformV2
+        top_type: lidar
+        x: [-54.0, 54.0]
+        y: [-54.0, 54.0]
+        z: [-5.0, 3.0]
+        xs: 180
+        ys: 180
+        zs: 10
+        input_size: [256, 704]
+        in_channels: 256
+        out_channels: 128
+  fuser:
+    type: ConvFuser
+    in_channels: [1280, 256]
+    out_channels: 512
+  decoder:
+    backbone:
+      type: CustomResNet
+      stride: [1, 1, 2]
+      numC_input: 512
+      num_channels: [128, 256, 512]
+    neck:
+      type: FPN_LSS
+      in_channels: 640
+      out_channels: 512
+      scale_factor: 2
+      extra_upsample: null
+  heads:
+    map: null
+    object:
+      type: CenterHead
+      in_channels: 512
+      train_cfg:
+        point_cloud_range: ${point_cloud_range}
+        grid_size: [1440, 1440, 41]
+        voxel_size: ${voxel_size}
+        out_size_factor: 8
+        dense_reg: 1
+        gaussian_overlap: 0.1
+        max_objs: 500
+        min_radius: 2
+        code_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2]
+      test_cfg:
+        post_center_limit_range: [-61.2, -61.2, -10.0, 61.2, 61.2, 10.0]
+        max_per_img: 500
+        max_pool_nms: false
+        min_radius: [4, 12, 10, 1, 0.85, 0.175]
+        score_threshold: 0.1
+        out_size_factor: 8
+        voxel_size: ${voxel_size[:2]}
+        nms_type: [circle, rotate, rotate, circle, rotate, rotate]
+        nms_scale: [[1.0], [1.0, 1.0], [1.0, 1.0], [1.0], [1.0, 1.0], [2.5, 4.0]]
+        pre_max_size: 1000
+        post_max_size: 83
+        nms_thr: 0.2
+      tasks:
+        - [car]
+        - [truck, construction_vehicle]
+        - [bus, trailer]
+        - [barrier]
+        - [motorcycle, bicycle]
+        - [pedestrian, traffic_cone]
+      common_heads:
+        reg: [2, 2]
+        height: [1, 2]
+        dim: [3, 2]
+        rot: [2, 2]
+        vel: [2, 2]
+      share_conv_channel: 64
+      bbox_coder:
+        type: CenterPointBBoxCoder
+        pc_range: ${point_cloud_range}
+        post_center_range: [-61.2, -61.2, -10.0, 61.2, 61.2, 10.0]
+        max_num: 500
+        score_threshold: 0.1
+        out_size_factor: 8
+        voxel_size: ${voxel_size[:2]}
+        code_size: 9
+      separate_head:
+        type: SeparateHead
+        init_bias: -2.19
+        final_kernel: 3
+      loss_cls:
+        type: GaussianFocalLoss
+        reduction: mean
+      loss_bbox:
+        type: L1Loss
+        reduction: mean
+        loss_weight: 0.25
+      norm_bbox: true
+    occ:
+      type: BEVOCCHead2D
+      in_dim: 128
+      out_dim: 128
+      Dz: 16
+      use_mask: true
+      num_classes: 18
+      use_predicter: true
+      class_balance: false
+      loss_occ:
+        type: CrossEntropyLoss
+        use_sigmoid: false
+        ignore_index: 255
+        loss_weight: 1.0
+      coordinate_transform:
+        type: CrossCoordinateSample
+        point_range: [-40.0, 40.0, -40.0, 40.0, 0.0, 0.0]
+        point_num: [200, 200, 1]
+        lidar_point_range: [-54.0, 54.0, -54.0, 54.0]
+        in_dim: 512
+        out_dim: 128
+  loss_scale:
+    object: 0.01
+    occ: 1.0
+optimizer:
+  type: AdamW
+  lr: 0.0002
+  weight_decay: 0.01
+optimizer_config:
+  grad_clip:
+    max_norm: 35
+    norm_type: 2
+lr_config:
+  policy: CosineAnnealing
+  warmup: linear
+  warmup_iters: 500
+  warmup_ratio: 0.33333333
+  min_lr_ratio: 0.001
+  by_epoch: false
+max_epochs: 6
+streaming:
+  enabled: true
+  cache_enabled: true
+  #* (11.12) 开启时使用二维 RefineNet + 拼接融合，并缓存融合结果；暂无辅助监督。
+  # 默认开启融合；仅缓存对比实验可用 --streaming.history_fusion.enabled False。
+  history_fusion:
+    enabled: true
+    channels: 512
+    internal_channels: 128
+  #* (11.12) 参照 StreamOcc 逆向位姿采样，适配 DAOcc 的 [B,C,X,Y] BEV。
+  # 使用当前增强 LiDAR 系 z=0 平面；范围取顶层 point_cloud_range，网格使用格心。
+  bev_warp:
+    enabled: true
+    plane_z: 0.0
+  #* (11.12) 维护并按迭代保存 EMA；训练中评估仍使用当前训练权重。
+  # 保存间隔和保留数量默认继承 checkpoint_config，EMA 文件保存在训练目录。
+  ema:
+    enabled: true
+    decay: 0.9990
+#* (11.12) 与 StreamOcc 一致：普通训练状态和 EMA 状态分别显式恢复。
+# 训练中流式评估仍按 DAOcc 使用当前训练权重。
+resume_from_EMA: null
+runner:
+  type: IterBasedRunner
+  max_iters: 21096
+custom_hooks: null
+checkpoint_config:
+  by_epoch: false
+  interval: 2000
+  save_last: true
+  save_optimizer: true
+  max_keep_ckpts: 1
+augment2d:
+  gridmask:
+    fixed_prob: true

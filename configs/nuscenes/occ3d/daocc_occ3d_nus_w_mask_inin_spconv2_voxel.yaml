@@ -1,244 +1,245 @@
 #* 基于 daocc_occ3d_nus_w_mask.yaml 复制模型配置，仅覆盖本机数据路径。
 #* Torchpack 自动合并上级 default.yaml，不会自动继承同目录的原模型文件。
 #* 原始数据根目录用于 nuScenes 数据表读取及检测评估，不能设为 info 输出目录。
-dataset_root: /home/wangyushen/Data/Datasets/Nuscenes/
+dataset_root: /home/wangyushen/Data/Datasets/Nuscenes/ # nuScenes 原始数据和元信息根目录
 
-evaluation:
-  interval: 1
-  jsonfile_prefix: /home/wangyushen/Data/Outputs/tmp
+evaluation: # 验证与评估设置
+  interval: 1 # 每隔多少个 epoch 评估一次
+  jsonfile_prefix: /home/wangyushen/Data/Outputs/tmp # 检测评估结果文件的输出前缀
 
 #* 新生成的 pkl 已包含各样本的 occ3d.occ_path，无需在训练配置中重复指定 gts。
 #* train 外层沿用 CBGSDataset，因此训练标注路径位于 data.train.dataset 下。
-data:
+data: # 数据集与加载器设置
   #* 每张 GPU 的 batch size；单卡先设为 1。
-  samples_per_gpu: 1
+  samples_per_gpu: 1 # 每张 GPU 的 batch size
   #* 每张 GPU 的数据加载进程数；设为 0 方便排查数据加载错误。
-  workers_per_gpu: 2
+  workers_per_gpu: 2 # 每张 GPU 的数据加载进程数；0 表示主进程加载
 
-  train:
-    dataset:
-      ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_train.pkl
-  val:
-    ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_val.pkl
-  test:
-    #* mini 的离线测试使用验证集及其真值。
-    ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_val.pkl
+  train: # 训练集配置
+    dataset: # CBGSDataset 包装的实际训练数据集
+      ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_train.pkl # 样本索引与标注信息 pkl 路径
+  val: # 验证集配置
+    ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_val.pkl # 样本索引与标注信息 pkl 路径
+  test: # 测试集配置
+    #* 离线测试使用验证集及其真值。
+    ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_val.pkl # 样本索引与标注信息 pkl 路径
 
-#* 以下模型和训练参数保持原配置；每卡 batch size 仍继承默认值 4。
+#* 以下为模型和训练参数；每卡 batch size 已在上方显式设为 1。
 #* 显存不足时可通过命令行 --data.samples_per_gpu 1 覆盖。
-voxel_size: [0.075, 0.075, 0.2]
-point_cloud_range: [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+voxel_size: [0.075, 0.075, 0.2] # 体素尺寸 [dx, dy, dz]，单位米
+# 点云分支处理±54m范围，最终占据预测对应的自车系XY±40m。也就是先在更大的空间范围内提取、融合特征，再对齐到目标占据区域。注意两者坐标系不同，不能直接按数组中心裁剪。
+point_cloud_range: [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0] # 点云范围 [xmin, ymin, zmin, xmax, ymax, zmax]，单位米
 
-augment3d:
-  scale: [1., 1.]
-  rotate: [-0., 0.]
-  translate: 0.
+augment3d: # 三维几何增强参数
+  scale: [1., 1.] # 随机缩放范围；[1, 1] 关闭缩放
+  rotate: [-0., 0.] # 随机旋转角度范围，单位弧度；此处关闭旋转
+  translate: 0. # 随机平移的标准差，单位米；0 关闭平移
 
-model:
-  type: BEVFusion
-  encoders:
-    lidar:
-      voxelize:
-        type: Spconv2Voxelization # 使用 spconv2 PointToVoxel；未配置 type 的原配置仍使用旧 Voxelization。
-        max_num_points: 10
-        point_cloud_range: ${point_cloud_range}
-        voxel_size: ${voxel_size}
-        max_voxels: [ 120000, 160000 ]
-      backbone:
-        type: SparseEncoderSpconv2 # 使用独立的官方 spconv 2.x 实现；原 SparseEncoder 和原配置不变。
-        in_channels: 5
-        sparse_shape: [ 1440, 1440, 41 ] # 输入体素网格尺寸：1440x1440x41
-        output_channels: 128
-        order:
+model: # 模型结构；type 由对应注册器查找并构建
+  type: BEVFusion # 模块/算法类型名；由对应构建器创建
+  encoders: # 相机与 LiDAR 特征编码分支
+    lidar: # LiDAR 点云分支
+      voxelize: # 将点云划分为体素
+        type: Spconv2Voxelization # 模块/算法类型名；由对应构建器创建
+        max_num_points: 10 # 每个体素最多保留的点数
+        point_cloud_range: ${point_cloud_range} # 点云范围 [xmin, ymin, zmin, xmax, ymax, zmax]，单位米
+        voxel_size: ${voxel_size} # 体素尺寸 [dx, dy, dz]，单位米
+        max_voxels: [ 120000, 160000 ] # 训练/测试时最多保留的体素数
+      backbone: # 特征提取骨干
+        type: SparseEncoderSpconv2 # 模块/算法类型名；由对应构建器创建
+        in_channels: 5 # 每个点/体素的输入特征维数（此数据管线为 XYZ、强度、时间差）
+        sparse_shape: [ 1440, 1440, 41 ] # 稀疏网格 [X, Y, Z]；本实现内部转换为 spconv2 的 [Z, Y, X]
+        output_channels: 128 # 输出稀疏特征通道数；高度维折叠到 BEV 后通道数还会增加
+        order: # 卷积模块执行顺序：卷积 → 归一化 → 激活
           - conv
           - norm
           - act
-        encoder_channels:
+        encoder_channels: # 各编码阶段内各块的输出通道数
           - [ 16, 16, 32 ]
           - [ 32, 32, 64 ]
           - [ 64, 64, 128 ]
           - [ 128, 128 ]
-        encoder_paddings:
+        encoder_paddings: # 与各阶段各块对应的卷积 padding；三元组沿配置的 XYZ 轴
           - [ 0, 0, 1 ]
           - [ 0, 0, 1 ]
           - [ 0, 0, [ 1, 1, 0 ] ]
           - [ 0, 0 ]
-        block_type: basicblock
-    camera:
-      backbone:
-        type: ResNet
-        depth: 50
-        out_indices: [1, 2, 3]
+        block_type: basicblock # 稀疏残差基本块类型
+    camera: # 多相机图像分支
+      backbone: # 特征提取骨干
+        type: ResNet # 模块/算法类型名；由对应构建器创建
+        depth: 50 # ResNet 层数
+        out_indices: [1, 2, 3] # 输出的 stage 索引（从 0 开始）；此处取后三个 stage
         # with_cp: true
-        init_cfg:
-          type: Pretrained
-          checkpoint: /home/wangyushen/Data/Weights/daocc/pretrained/resnet50-0676ba61.pth
-      neck:
-        type: GeneralizedLSSFPN
-        in_channels: [512, 1024, 2048]
-        out_channels: 256
-        start_level: 0
-        num_outs: 3
-        norm_cfg:
-          type: BN2d
-          requires_grad: true
-        act_cfg:
-          type: ReLU
-          inplace: true
-        upsample_cfg:
-          mode: bilinear
-          align_corners: false
-      vtransform:
-        type: BEVTransformV2
-        top_type: lidar
-        x: [-54.0, 54.0]
-        y: [-54.0, 54.0]
-        z: [-5.0, 3.0]
-        xs: 180
-        ys: 180
-        zs: 10
-        input_size: [256, 704]
-        in_channels: 256
-        out_channels: 128
-  fuser:
-    type: ConvFuser
-    in_channels: [1280, 256]
-    out_channels: 512
-  decoder:
-    backbone:
-      type: CustomResNet
-      stride: [1, 1, 2]
-      numC_input : 512
-      num_channels: [128, 256, 512]
-    neck:
-      type: FPN_LSS
-      in_channels: 640
-      out_channels: 512
-      scale_factor: 2
-      extra_upsample: null
-  heads:
-    map: null
-    object:
-      type: CenterHead
-      in_channels: 512
-      train_cfg:
-        point_cloud_range: ${point_cloud_range}
-        grid_size: [ 1440, 1440, 41 ]
-        voxel_size: ${voxel_size}
-        out_size_factor: 8
-        dense_reg: 1
-        gaussian_overlap: 0.1
-        max_objs: 500
-        min_radius: 2
-        code_weights: [ 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2 ]
-      test_cfg:
-        post_center_limit_range: [ -61.2, -61.2, -10.0, 61.2, 61.2, 10.0 ]
-        max_per_img: 500
-        max_pool_nms: false
-        min_radius: [ 4, 12, 10, 1, 0.85, 0.175 ]
-        score_threshold: 0.1
-        out_size_factor: 8
-        voxel_size: ${voxel_size[:2]}
-        nms_type:
+        init_cfg: # 参数初始化方式
+          type: Pretrained # 模块/算法类型名；由对应构建器创建
+          checkpoint: /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth # 预训练权重文件路径
+      neck: # 多尺度特征融合模块
+        type: GeneralizedLSSFPN # 模块/算法类型名；由对应构建器创建
+        in_channels: [512, 1024, 2048] # 输入特征通道数
+        out_channels: 256 # 输出特征通道数
+        start_level: 0 # 从第几个输入特征层开始融合
+        num_outs: 3 # 声明的输出层数；本实现实际返回层数由 start/end_level 决定
+        norm_cfg: # 归一化层设置
+          type: BN2d # 模块/算法类型名；由对应构建器创建
+          requires_grad: true # 是否训练归一化层的缩放和偏置参数
+        act_cfg: # 激活函数设置
+          type: ReLU # 模块/算法类型名；由对应构建器创建
+          inplace: true # 是否原地执行激活以节省内存
+        upsample_cfg: # 上采样插值设置
+          mode: bilinear # 双线性插值
+          align_corners: false # 插值时是否对齐角点像素中心
+      vtransform: # 将图像特征投影/采样到三维网格，再折叠为 BEV
+        type: BEVTransformV2 # 模块/算法类型名；由对应构建器创建
+        top_type: lidar # 参考网格所在坐标系；lidar 表示激光雷达坐标系
+        x: [-54.0, 54.0] # 参考网格 X 轴范围，单位米
+        y: [-54.0, 54.0] # 参考网格 Y 轴范围，单位米
+        z: [-5.0, 3.0] # 参考网格 Z 轴范围，单位米
+        xs: 180 # X 轴网格数量
+        ys: 180 # Y 轴网格数量
+        zs: 10 # Z 轴采样层数；此处 10 层，不是最终占据高度层数
+        input_size: [256, 704] # 输入图像尺寸 [高度, 宽度]，单位像素
+        in_channels: 256 # 输入特征通道数
+        out_channels: 128 # 每层高度的特征通道数；折叠 10 层后得到 1280 通道 BEV
+  fuser: # 融合相机与 LiDAR 的 BEV 特征
+    type: ConvFuser # 模块/算法类型名；由对应构建器创建
+    in_channels: [1280, 256] # 按相机、LiDAR 顺序的 BEV 通道数；相机 128×10=1280，LiDAR 为 256
+    out_channels: 512 # 输出特征通道数
+  decoder: # 融合后 BEV 特征解码器
+    backbone: # 特征提取骨干
+      type: CustomResNet # 模块/算法类型名；由对应构建器创建
+      stride: [1, 1, 2] # 各残差阶段的步长；2 表示空间尺寸减半
+      numC_input : 512 # 输入 BEV 特征通道数
+      num_channels: [128, 256, 512] # 各残差阶段输出通道数
+    neck: # 多尺度特征融合模块
+      type: FPN_LSS # 模块/算法类型名；由对应构建器创建
+      in_channels: 640 # 浅层 128 与深层 512 通道拼接后的总通道数
+      out_channels: 512 # 输出特征通道数
+      scale_factor: 2 # 融合前对深层特征的上采样倍数
+      extra_upsample: null # 融合后的额外上采样；null 表示关闭
+  heads: # 各任务的预测头
+    map: null # 地图分割头；null 表示不启用
+    object: # 三维目标检测分支
+      type: CenterHead # 模块/算法类型名；由对应构建器创建
+      in_channels: 512 # 输入特征通道数
+      train_cfg: # 检测头训练目标生成设置
+        point_cloud_range: ${point_cloud_range} # 点云范围 [xmin, ymin, zmin, xmax, ymax, zmax]，单位米
+        grid_size: [ 1440, 1440, 41 ] # 检测用体素网格尺寸 [X, Y, Z]
+        voxel_size: ${voxel_size} # 体素尺寸 [dx, dy, dz]，单位米
+        out_size_factor: 8 # 检测特征图相对原始 XY 体素网格的下采样倍数
+        dense_reg: 1 # 目标编码容量倍率；容量为 max_objs × dense_reg
+        gaussian_overlap: 0.1 # 生成中心点高斯热图时要求的重叠程度
+        max_objs: 500 # 每个检测任务用于编码目标的基础容量
+        min_radius: 2 # 中心高斯热图的最小半径（特征图像素）
+        code_weights: [ 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2 ] # 回归权重：XY偏移、Z、长宽高、sin/cos朝向、XY速度
+      test_cfg: # 检测头推理与后处理设置
+        post_center_limit_range: [ -61.2, -61.2, -10.0, 61.2, 61.2, 10.0 ] # 保留预测框中心的三维范围 [xmin,ymin,zmin,xmax,ymax,zmax]
+        max_per_img: 500 # 每帧检测数上限配置；当前 CenterHead 未直接读取此项
+        max_pool_nms: false # 热图池化 NMS 开关；当前 CenterHead 未直接读取此项
+        min_radius: [ 4, 12, 10, 1, 0.85, 0.175 ] # 六个任务的圆形 NMS 距离阈值参数；仅 circle 分支使用
+        score_threshold: 0.1 # 过滤低于该置信度的预测框
+        out_size_factor: 8 # 检测特征图相对原始 XY 体素网格的下采样倍数
+        voxel_size: ${voxel_size[:2]} # XY 平面的体素尺寸 [dx, dy]，引用全局 voxel_size 前两项
+        nms_type: # 六个检测任务分别使用的 NMS：circle 为中心距离，rotate 为旋转框 IoU
           - circle
           - rotate
           - rotate
           - circle
           - rotate
           - rotate
-        nms_scale:
+        nms_scale: # 旋转 NMS 时各类别框尺寸的临时缩放系数；输出尺寸会还原
           - [ 1.0 ]
           - [ 1.0, 1.0 ]
           - [ 1.0, 1.0 ]
           - [ 1.0 ]
           - [ 1.0, 1.0 ]
           - [ 2.5, 4.0 ]
-        pre_max_size: 1000
-        post_max_size: 83
-        nms_thr: 0.2
-      tasks:
+        pre_max_size: 1000 # 旋转 NMS 前最多保留的候选框数
+        post_max_size: 83 # 每个任务 NMS 后最多保留的框数
+        nms_thr: 0.2 # 旋转框 NMS 的 IoU 阈值
+      tasks: # 六组检测任务；每组独立预测类别热图
         - [ "car" ]
         - [ "truck", "construction_vehicle" ]
         - [ "bus", "trailer" ]
         - [ "barrier" ]
         - [ "motorcycle", "bicycle" ]
         - [ "pedestrian", "traffic_cone" ]
-      common_heads:
-        reg: [ 2, 2 ]
-        height: [ 1, 2 ]
-        dim: [ 3, 2 ]
-        rot: [ 2, 2 ]
-        vel: [ 2, 2 ]
-      share_conv_channel: 64
-      bbox_coder:
-        type: CenterPointBBoxCoder
-        pc_range: ${point_cloud_range}
-        post_center_range: [ -61.2, -61.2, -10.0, 61.2, 61.2, 10.0 ]
-        max_num: 500
-        score_threshold: 0.1
-        out_size_factor: 8
-        voxel_size: ${voxel_size[:2]}
-        code_size: 9
-      separate_head:
-        type: SeparateHead
-        init_bias: -2.19
-        final_kernel: 3
-      loss_cls:
-        type: GaussianFocalLoss
-        reduction: mean
-      loss_bbox:
-        type: L1Loss
-        reduction: mean
-        loss_weight: 0.25
-      norm_bbox: true
-    occ:
-      type: BEVOCCHead2D
-      in_dim: 128
-      out_dim: 128
-      Dz: 16
-      use_mask: true
-      num_classes: 18
-      use_predicter: true
-      class_balance: false
-      loss_occ:
-        type: CrossEntropyLoss
-        use_sigmoid: false
-        ignore_index: 255
-        loss_weight: 1.0
-      coordinate_transform:
-        type: CrossCoordinateSample
-        point_range: [-40., 40., -40., 40., 0., 0.]
-        point_num: [200, 200, 1]
-        lidar_point_range: [-54.0, 54.0, -54.0, 54.0]
-        in_dim: 512
-        out_dim: 128
-  loss_scale:
-    object: 0.01
-    occ: 1.0
+      common_heads: # 回归分支配置，格式均为 [输出通道数, 卷积层数]
+        reg: [ 2, 2 ] # 中心点在特征图网格内的 XY 偏移
+        height: [ 1, 2 ] # 框中心高度 Z
+        dim: [ 3, 2 ] # 框的三维尺寸
+        rot: [ 2, 2 ] # 朝向角的 sin/cos 编码
+        vel: [ 2, 2 ] # 平面速度 vx、vy
+      share_conv_channel: 64 # 各任务头共享卷积的通道数
+      bbox_coder: # 将热图和回归量解码成三维框
+        type: CenterPointBBoxCoder # 模块/算法类型名；由对应构建器创建
+        pc_range: ${point_cloud_range} # 点云范围；解码平面坐标时使用 XY 起点
+        post_center_range: [ -61.2, -61.2, -10.0, 61.2, 61.2, 10.0 ] # 解码后允许的框中心范围 [xmin,ymin,zmin,xmax,ymax,zmax]
+        max_num: 500 # 每个任务解码时选取的最高分候选数量
+        score_threshold: 0.1 # 过滤低于该置信度的预测框
+        out_size_factor: 8 # 检测特征图相对原始 XY 体素网格的下采样倍数
+        voxel_size: ${voxel_size[:2]} # XY 平面的体素尺寸 [dx, dy]，引用全局 voxel_size 前两项
+        code_size: 9 # 输出框维数：位置3 + 尺寸3 + 朝向1 + 速度2
+      separate_head: # 每个检测任务内部各预测分支的构造设置
+        type: SeparateHead # 模块/算法类型名；由对应构建器创建
+        init_bias: -2.19 # 热图输出层初始偏置，使初始前景概率较低
+        final_kernel: 3 # 预测分支最后一层卷积核大小
+      loss_cls: # 中心点热图分类损失
+        type: GaussianFocalLoss # 模块/算法类型名；由对应构建器创建
+        reduction: mean # 损失聚合方式；mean 表示均值归约
+      loss_bbox: # 目标框回归损失
+        type: L1Loss # 模块/算法类型名；由对应构建器创建
+        reduction: mean # 损失聚合方式；mean 表示均值归约
+        loss_weight: 0.25 # 该损失项的权重
+      norm_bbox: true # 训练时对框尺寸取对数，推理时用 exp 还原
+    occ: # 三维语义占据预测分支
+      type: BEVOCCHead2D # 模块/算法类型名；由对应构建器创建
+      in_dim: 128 # 输入特征通道数
+      out_dim: 128 # 中间/输出特征通道数
+      Dz: 16 # 最终占据预测的高度层数 z: 16 只决定输出 16 层，不定义每层对应的物理高度。高度的物理范围由占据真值网格的定义决定；模型用真值监督学习这 16 层的含义。
+      use_mask: true # 只对 mask_camera 标记为可见的体素计算占据损失
+      num_classes: 18 # 占据类别数，含空闲类别
+      use_predicter: true # 启用 MLP，将每个 BEV 位置映射为 Dz × 类别数个分数
+      class_balance: false # 是否按类别频率为占据损失加权
+      loss_occ: # 占据语义分类损失
+        type: CrossEntropyLoss # 模块/算法类型名；由对应构建器创建
+        use_sigmoid: false # false 使用多类别 softmax 交叉熵
+        ignore_index: 255 # 标签为 255 的体素不参与该交叉熵损失
+        loss_weight: 1.0 # 该损失项的权重
+      coordinate_transform: # 将 LiDAR BEV 采样到目标占据坐标网格
+        type: CrossCoordinateSample # 模块/算法类型名；由对应构建器创建 
+        point_range: [-40., 40., -40., 40., 0., 0.]   # 目标自车系采样范围 [ymin,ymax,xmin,xmax,zmin,zmax]，单位米 # 最终OCC空间范围需要分开看 XY 平面和 Z 高度。
+        point_num: [200, 200, 1]                      # 目标采样数量 [Y, X, Z]；此处只在 z=0 采样一个平面 示在 z=0 平面上采样 200×200 个位置；最终 16 层高度由后续占据头预测。
+        lidar_point_range: [-54.0, 54.0, -54.0, 54.0] # 源 LiDAR BEV 范围 [ymin,ymax,xmin,xmax]，单位米
+        in_dim: 512 # 输入特征通道数
+        out_dim: 128 # 中间/输出特征通道数
+  loss_scale: # 各任务损失的整体权重
+    object: 0.01 # 检测任务总损失乘以 0.01
+    occ: 1.0 # 占据任务总损失乘以 1.0
 
 # AdamW: 基础学习率2e-4，前500个iteration使用线性warmup
-# warmup开始时，2e-4/3=6.67e-5，500步内逐步增加到6.67e-5
-optimizer:
-  type: AdamW
-  lr: 2.0e-4
-  weight_decay: 0.01
+# warmup 起始学习率约为 6.67e-5，500 步内逐步接近当时的余弦调度学习率。
+optimizer: # 优化器配置
+  type: AdamW # 模块/算法类型名；由对应构建器创建
+  lr: 2.0e-4 # 基础学习率
+  weight_decay: 0.01 # 权重衰减系数
 
-optimizer_config:
-  grad_clip:
-    max_norm: 35
-    norm_type: 2
+optimizer_config: # 优化器更新时的附加设置
+  grad_clip: # 梯度裁剪，限制梯度范数以稳定训练
+    max_norm: 35 # 梯度范数上限
+    norm_type: 2 # 计算梯度范数的阶数；2 表示 L2 范数
 
 # warmup 结束后，按照余弦退火逐渐降低学习率。
 # min_lr_ratio: 1e-3 表示余弦退火的理论目标最小学习率为：2e-4 × 1e-3 = 2e-7
 # MMCV默认按epoch调整学习率：训练最初500步：学习率线性增加；预热结束后：每个epoch开始时，根据余弦公式更新一次，统一epoch内保持不变
-lr_config:
-  policy: CosineAnnealing
-  warmup: linear
-  warmup_iters: 500
-  warmup_ratio: 0.33333333
-  min_lr_ratio: 1.0e-3
+lr_config: # 学习率调度
+  policy: CosineAnnealing # 余弦退火策略
+  warmup: linear # 线性学习率预热
+  warmup_iters: 500 # 预热持续的 iteration 数
+  warmup_ratio: 0.33333333 # 预热起点相对常规调度学习率的比例
+  min_lr_ratio: 1.0e-3 # 余弦调度的最小/基础学习率比例；对应理论最小值 2e-7
   # by_epoch: false       # 每个iteration更新余弦学习率；默认为true
 
-max_epochs: 6
+max_epochs: 6 # 训练总 epoch 数
 
 

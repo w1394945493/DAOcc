@@ -28,6 +28,11 @@ def train_model(
     validate=False,
     timestamp=None,
 ):
+    #* (11.12) 新增流式训练分派：启用时进入独立的序列采样、缓存和训练内验证流程。
+    # 默认关闭；原 DAOcc 的 DataLoader、Runner 和评估 Hook 构建逻辑继续保留。
+    if cfg.get("streaming", {}).get("enabled", False):
+        from .train_stream import train_stream_model
+        return train_stream_model(model, dataset, cfg, distributed, validate, timestamp)
     logger = get_root_logger()
 
     # 构建训练 DataLoader。cfg.seed 作为基础种子传入 MMDetection：框架会结合

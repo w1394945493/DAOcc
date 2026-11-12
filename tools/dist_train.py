@@ -1,9 +1,27 @@
+#* (11.12) 定向屏蔽 MMCV 迁移公告和 Numba jit 默认值弃用提示。
+# 必须在依赖导入前设置；环境变量使 spawn 启动的数据加载子进程也继承过滤。
+import os
+import re
+import warnings
+
+_quiet_warning_messages = (
+    'On January 1, 2023, MMCV will release v2.0.0',
+    "The 'nopython' keyword argument was not supplied to the 'numba.jit' decorator",
+)
+_warning_options = os.environ.get('PYTHONWARNINGS', '')
+for _message in _quiet_warning_messages:
+    warnings.filterwarnings('ignore', message=re.escape(_message))
+    # PYTHONWARNINGS 用逗号分隔规则，因此环境变量仅取首个逗号之前的前缀。
+    _option = 'ignore:' + _message.split(',', 1)[0]
+    if _option not in _warning_options.split(','):
+        _warning_options = ','.join(filter(None, (_warning_options, _option)))
+os.environ['PYTHONWARNINGS'] = _warning_options
+
 import setproctitle
-setproctitle.setproctitle("wangyushen")
+# setproctitle.setproctitle("wangyushen")
 
 import argparse
 import copy
-import os
 import random
 import time
 
@@ -37,6 +55,12 @@ def main():
     configs.update(opts)
 
     cfg = Config(recursive_eval(configs), filename=args.config)
+    #*-----------------------------------------------------------------------------#
+    #* (11.12) 新增流式配置接入：仅显式启用 streaming.enabled 时准备序列数据集和模型配置。
+    # 同时按需注册流式模块；未启用时继续执行原配置构建流程。
+    if cfg.get("streaming", {}).get("enabled", False):
+        from mmdet3d.apis.train_stream import prepare_streaming_config
+        cfg = prepare_streaming_config(cfg)
 
     torch.backends.cudnn.benchmark = cfg.cudnn_benchmark
     if args.launcher == 'none':

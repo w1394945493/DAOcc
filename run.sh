@@ -444,6 +444,46 @@ configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel.yaml \
 --cfg-options fp16=None \
 --out-dir /home/wangyushen/Data/Outputs/daocc/occ_predictions/camera_lidar_fusion
 
+#*========================================================================#
+#* 模型评估
+# 使用spconv训练模型评估
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=2,3 PYTHONPATH=$PWD \
+python -m torch.distributed.run \
+--standalone \
+--nnodes=1 \
+--nproc_per_node=2 \
+tools/test.py \
+/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin.yaml \
+/home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_fp32_debug/epoch_6.pth \
+--dist \
+--launcher pytorch \
+--cfg-options \
+fp16=None \
+data.test.samples_per_gpu=4 \
+data.workers_per_gpu=4 \
+--out-dir /home/wangyushen/Data/Outputs/daocc/test/daocc_multi
+
+# spconv ema
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=2,3 PYTHONPATH=$PWD \
+python -m torch.distributed.run \
+--standalone \
+--nnodes=1 \
+--nproc_per_node=2 \
+tools/test.py \
+/home/wangyushen/forks/CUDA-DAOcc/DAOcc/configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin.yaml \
+/home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_fp32_debug/epoch_6_ema.pth \
+--dist \
+--launcher pytorch \
+--cfg-options \
+fp16=None \
+data.test.samples_per_gpu=4 \
+data.workers_per_gpu=4 \
+--out-dir /home/wangyushen/Data/Outputs/daocc/test/daocc_multi_ema
+
 #* -------------------------------------------------------------------------#
 #* BIT服务器
 conda activate daocc-cu121
@@ -1136,7 +1176,8 @@ python tools/visualize_daocc_depth_lss_comparison.py \
 --video-dir /home/wangyushen/Data/Outputs/daocc/outputs/daocc_depth_lss_comparison/videos \
 --video-fps 2
 
-#* ----------------------------------------------------------#
+#* --------------------------------------------------------------#
+#* BIT
 # 测试按迭代步数保存权重、评估可行性
 # 使用 daocc_occ3d_nus_w_mask_inin_spconv2_voxel_depth_lss_iter.yaml 时：
 # CHECKPOINT_INTERVAL：每隔多少个全局 iteration 保存一次模型。
@@ -1160,3 +1201,118 @@ RUN_DIR=/home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_vox
 FP32=1 \
 PYTHON=python \
 bash scripts/train_occ3d.sh
+
+#* (11.11)说明：nuScenes 采用CBGS采样策略：训练集 28130 → 123,584 原为原数据集4.39倍
+#* FP16混合精度训练的优势：显存占用减少一半，节省训练时间
+#* DAOcc: 使用nuImages上的预训练权重
+# --load_from None \
+# --resume_from /home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_iter/latest.pth \
+
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=5,7 \
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+PYTHONWARNINGS=ignore \
+python -m torch.distributed.run \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=2 \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_iter.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_iter_fp16_htc \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.samples_per_gpu 4 \
+  --data.workers_per_gpu 4 \
+  --max_epochs 6 \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.interval 3862 \
+  --evaluation.interval 3862 \
+  --max_keep_ckpt 1
+
+#*=======================================================================#
+#* 流式训练
+# 可视化验证流式训练数据集处理是否正确
+# --cfg-options data.train.dataset.keep_consistent_seq_aug=False  # 可选：子序列
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0 python tools/visualize_streaming_bev.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  /home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_fp32/epoch_6.pth \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/outputs/stream_bev_warp_consis_aug_check \
+  --split both \
+  --batch-size 2 \
+  --steps 24 \
+  --workers 4 \
+  --precision fp32
+
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 \
+  tools/visualize_streaming_bev.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  /home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_fp32/epoch_6.pth \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/outputs/stream_bev_check_2gpu \
+  --split both \
+  --batch-size 2 \
+  --steps 24 \
+  --workers 2 \
+  --precision fp32
+
+#*----------------------------------------------------------------------#
+#* 训练(流式)
+#* 单卡训练
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+NUM_FRAMES=28130
+BATCH_SIZE=1
+NUM_WORKERS=4
+GPUS=1
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+CUDA_VISIBLE_DEVICES=0 python tools/train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_daocc \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1
+
+#* 训练中断恢复训练
+# --resume_from /home/wangyushen/Data/Outputs/daocc/train/stream_daocc/iter_28130.pth \
+# --resume_from_EMA /home/wangyushen/Data/Outputs/daocc/train/stream_daocc/iter_28130_ema.pth
+#* 多卡训练
+# 28130帧，total bs=8 epochs=24 总迭代步为84390步
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+
+CUDA_VISIBLE_DEVICES=0,2 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_daocc/w_mask \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1

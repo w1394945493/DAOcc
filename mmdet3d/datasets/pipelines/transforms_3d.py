@@ -34,6 +34,32 @@ class ImageAug3D:
         self.rot_lim = rot_lim
         self.is_train = is_train
 
+    #* (11.12) 流式 sampler 显式采样几何增强，子序列内可复用；不改变普通随机调用路径。
+    # 原图尺寸在 worker 加载后才可用，因此保存裁剪比例，执行时转换成像素坐标。
+    def get_augmentation(self, rng=None):
+        rng = np.random if rng is None else rng
+        if not self.is_train:
+            return dict(resize_delta=0.0, bot_pct=float(np.mean(self.bot_pct_lim)),
+                        crop_w_fraction=0.5, flip=False, rotate=0.0)
+        resize_delta = float(rng.uniform(*self.resize_lim))
+        bot_pct = float(rng.uniform(*self.bot_pct_lim))
+        crop_w_fraction = float(rng.uniform(0, 1))
+        flip = bool(self.rand_flip and rng.choice([0, 1]))
+        rotate = float(rng.uniform(*self.rot_lim))
+        return dict(resize_delta=resize_delta, bot_pct=bot_pct,
+                    crop_w_fraction=crop_w_fraction, flip=flip, rotate=rotate)
+
+    def sample_from_config(self, ori_shape, aug_config):
+        W, H = ori_shape
+        fH, fW = self.final_dim
+        resize = float(fW) / float(W) + aug_config['resize_delta']
+        resize_dims = (int(W * resize), int(H * resize))
+        newW, newH = resize_dims
+        crop_h = int((1 - aug_config['bot_pct']) * newH) - fH
+        crop_w = int(aug_config['crop_w_fraction'] * max(0, newW - fW))
+        crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
+        return resize, resize_dims, crop, aug_config['flip'], aug_config['rotate']
+
     def sample_augmentation(self, results):
         W, H = results["ori_shape"]
         fH, fW = self.final_dim
@@ -98,8 +124,16 @@ class ImageAug3D:
         imgs = data["img"]
         new_imgs = []
         transforms = []
-        for img in imgs:
-            resize, resize_dims, crop, flip, rotate = self.sample_augmentation(data)
+        #* (11.12) 每相机独立参数，时间上由 keep_consistent_seq_aug 决定是否复用。
+        aug_config = data.get('aug_config')
+        if aug_config is not None and len(aug_config['2d']) != len(imgs):
+            raise ValueError('Sequence image augmentation does not match camera count')
+        for camera_index, img in enumerate(imgs):
+            if aug_config is None:
+                resize, resize_dims, crop, flip, rotate = self.sample_augmentation(data)
+            else:
+                resize, resize_dims, crop, flip, rotate = self.sample_from_config(
+                    data['ori_shape'], aug_config['2d'][camera_index])
             post_rot = torch.eye(2)
             post_tran = torch.zeros(2)
             new_img, rotation, translation = self.img_transform(
@@ -172,8 +206,16 @@ class ImageAug3DWaymo(ImageAug3D):
         imgs = data["img"]
         new_imgs = []
         transforms = []
-        for img, ori_shape in zip(imgs, data["ori_shape"]):
-            resize, resize_dims, crop, flip, rotate = self.sample_augmentation(ori_shape)
+        #* (11.12) 与 ImageAug3D 保持相同显式增强接口，保留各相机原始尺寸。
+        aug_config = data.get('aug_config')
+        if aug_config is not None and len(aug_config['2d']) != len(imgs):
+            raise ValueError('Sequence image augmentation does not match camera count')
+        for camera_index, (img, ori_shape) in enumerate(zip(imgs, data["ori_shape"])):
+            if aug_config is None:
+                resize, resize_dims, crop, flip, rotate = self.sample_augmentation(ori_shape)
+            else:
+                resize, resize_dims, crop, flip, rotate = self.sample_from_config(
+                    ori_shape, aug_config['2d'][camera_index])
             post_rot = torch.eye(2)
             post_tran = torch.zeros(2)
             new_img, rotation, translation = self.img_transform(
@@ -205,13 +247,29 @@ class GlobalRotScaleTrans:
         self.trans_lim = trans_lim
         self.is_train = is_train
 
+    #* (11.12) 由流式 sampler 采样并传递，确保多 worker 下子序列几何增强一致。
+    def get_augmentation(self, rng=None):
+        rng = random if rng is None else rng
+        if not self.is_train:
+            return dict(scale=1.0, theta=0.0, translation=[0.0, 0.0, 0.0])
+        return dict(scale=float(rng.uniform(*self.resize_lim)),
+                    theta=float(rng.uniform(*self.rot_lim)),
+                    translation=[float(rng.normal(0, self.trans_lim)) for _ in range(3)])
+
     def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
         transform = np.eye(4).astype(np.float32)
 
         if self.is_train:
-            scale = random.uniform(*self.resize_lim)
-            theta = random.uniform(*self.rot_lim)
-            translation = np.array([random.normal(0, self.trans_lim) for i in range(3)])
+            #* (11.12) 仅显式传入 aug_config 时读取采样器参数；原路径的随机行为保留。
+            aug_config = data.get('aug_config')
+            if aug_config is None:
+                scale = random.uniform(*self.resize_lim)
+                theta = random.uniform(*self.rot_lim)
+                translation = np.array([random.normal(0, self.trans_lim) for i in range(3)])
+            else:
+                scale = aug_config['3d']['scale']
+                theta = aug_config['3d']['theta']
+                translation = np.asarray(aug_config['3d']['translation'], dtype=np.float64)
             rotation = np.eye(3)
 
             if "points" in data:
@@ -322,9 +380,21 @@ class GridMask:
 
 @PIPELINES.register_module()
 class RandomFlip3D:
+    #* (11.12) 翻转与旋转/缩放共同保存进 StreamOcc 风格的 aug_config['3d']。
+    def get_augmentation(self, rng=None):
+        rng = random if rng is None else rng
+        return dict(flip_horizontal=bool(rng.choice([0, 1])),
+                    flip_vertical=bool(rng.choice([0, 1])))
+
     def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        flip_horizontal = random.choice([0, 1])
-        flip_vertical = random.choice([0, 1])
+        #* (11.12) 序列请求携带实际翻转参数，避免不同 worker 对相邻帧重新随机采样。
+        aug_config = data.get('aug_config')
+        if aug_config is None:
+            flip_horizontal = random.choice([0, 1])
+            flip_vertical = random.choice([0, 1])
+        else:
+            flip_horizontal = aug_config['3d']['flip_horizontal']
+            flip_vertical = aug_config['3d']['flip_vertical']
 
         rotation = np.eye(3)
         if flip_horizontal:

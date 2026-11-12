@@ -1,7 +1,7 @@
 <!-- 检查端口是否释放： -->
 ss -lntpe '( sport = :17891 )'
 <!-- 找到对应的 SSH 进程 -->
-loginctl session-status 7268 --no-pager
+loginctl session-status 2795 --no-pager
 <!-- 打印内容： -->
 7268 - wangyushen (1059)
   Since: Fri 2026-11-06 09:56:36 CST; 1h 20min ago
@@ -20,7 +20,7 @@ Service: sshd
 3458744  sshd: wangyushen         # 你的用户进程 -->
 
 <!-- 之前残留、不再需要的 SSH 连接，直接执行： -->
-kill 3458744
+kill 520096
 
 <!-- git -->
 git config --local http.proxy http://127.0.0.1:17891

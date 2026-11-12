@@ -205,6 +205,12 @@ class BEVFusion(Base3DFusionModel):
 
         return feats, coords, sizes
 
+    #* (11.12) 新增 BEV 扩展接口，供 StreamingBEVFusion 子类读取历史并记录当前特征。
+    # 原 BEVFusion 默认原样返回输入，不新增参数，也不执行历史融合。
+    def process_bev_features(self, bev):
+        """Identity extension point; ordinary DAOcc keeps its original computation."""
+        return bev
+
     # 仅在 fp16_enabled 开启时，将 img/points 中的 FP32 张量自动转成 FP16。
     # 几何变换等敏感子模块可通过 force_fp32 转回 FP32，因此这是混合精度。
     # 这里逻辑可近似理解为:
@@ -330,8 +336,12 @@ class BEVFusion(Base3DFusionModel):
         # 这里是二维残差卷积与上采样，不是Transformer Decoder。
         if self.decoder is not None:
             x = self.decoder["backbone"](x) # 3:[(1 128 180 180) (1 256 180 180) (1 512 90 90)]
-            x = self.decoder["neck"](x)
+            x = self.decoder["neck"](x)     # (1 512 180 180)
             # 当前输出[B,512,180,180]，随后同时服务于检测与占据预测。
+
+        #* (11.12) 在 Decoder 输出、各预测头之前调用 BEV 扩展接口。
+        # 原模型执行恒等操作；流式子类在此接入历史接口，当前阶段仍返回当前 BEV。
+        x = self.process_bev_features(x)
 
         #* =================== 4. 训练分支：各预测头计算监督损失 ===================
         # model.train()走这里；完整前向检查使用model.eval()，进入下面推理分支。

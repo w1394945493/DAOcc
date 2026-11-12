@@ -4,6 +4,20 @@ import json
 import os
 import warnings
 
+# 在第三方库导入前过滤已知公告，避免每个分布式进程重复打印；保留其他警告。
+warnings.filterwarnings(
+    "ignore",
+    message=r"On January 1, 2023, MMCV will release v2\.0\.0",
+    category=UserWarning,
+    module=r"^mmcv$",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"The 'nopython' keyword argument was not supplied to the 'numba\.jit' decorator\.",
+    category=Warning,  # Numba 自定义弃用警告不继承 Python 的 DeprecationWarning。
+    module=r"^mmdet3d\.core\.bbox\.box_np_ops$",
+)
+
 import mmcv
 import torch
 from torchpack.utils.config import configs
@@ -31,7 +45,12 @@ def parse_args():
     parser.add_argument("--dist", action='store_true', help="distributed or not")
     # 原参数用于把全部预测写入一个文件，注释保留；现在使用 --out-dir 指定目录。
     # parser.add_argument("--out", help="output result file in pickle format")
-    parser.add_argument("--out-dir", help="output root for scene/sample_token.pkl prediction files")
+    parser.add_argument("--out-dir", help="output directory for metrics.json and optional per-frame predictions")
+    parser.add_argument(
+        "--save-predictions",
+        action="store_true",
+        help="save per-frame predictions under --out-dir (disabled by default)",
+    )
     parser.add_argument(
         "--fuse-conv-bn",
         action="store_true",
@@ -106,6 +125,8 @@ def parse_args():
     )
     parser.add_argument("--local_rank", type=int, default=0)
     args = parser.parse_args()
+    if args.save_predictions and not args.out_dir:
+        parser.error("--save-predictions requires --out-dir")
     if "LOCAL_RANK" not in os.environ:
         os.environ["LOCAL_RANK"] = str(args.local_rank)
 
@@ -235,7 +256,7 @@ def main():
 
     configs.load(args.config, recursive=True)
     cfg = Config(recursive_eval(configs), filename=args.config)
-    print(cfg)
+    # 不打印完整配置，避免分布式进程重复输出大量配置内容。
 
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
@@ -319,8 +340,8 @@ def main():
             broadcast_buffers=False,
         )
         # outputs = multi_gpu_test(model, data_loader, args.tmpdir, args.gpu_collect)
-    # 只有指定输出目录才安装保存钩子；没有指定时保持原推理行为。
-    writer = install_prediction_writer(model, data_loader, args.out_dir) if args.out_dir else None
+    # 仅显式启用 --save-predictions 时保存每帧预测；--out-dir 本身只控制评估输出目录。
+    writer = install_prediction_writer(model, data_loader, args.out_dir) if args.save_predictions else None
     try:
         if not distributed:
             outputs = single_gpu_test(model, data_loader)
@@ -342,7 +363,7 @@ def main():
         # 原推理结束后统一保存的代码注释保留，避免再次写入全部结果。
         # if args.out_dir:
         #     save_sample_predictions(outputs, dataset, args.out_dir)
-        if args.out_dir:
+        if args.save_predictions:
             print(f"Per-frame predictions saved during inference to {args.out_dir}")
         kwargs = {} if args.eval_options is None else args.eval_options
         if args.format_only:
@@ -360,7 +381,13 @@ def main():
             ]:
                 eval_kwargs.pop(key, None)
             eval_kwargs.update(dict(metric=args.eval, **kwargs))
-            print(dataset.evaluate(outputs, **eval_kwargs))
+            metrics = dataset.evaluate(outputs, **eval_kwargs)
+            print(metrics)
+            # rank 0 在评估成功后保存返回指标，与逐帧预测保存开关独立。
+            if args.out_dir:
+                metrics_path = os.path.join(args.out_dir, "metrics.json")
+                mmcv.dump(metrics, metrics_path, file_format="json", indent=2)
+                print(f"Evaluation metrics saved to {metrics_path}")
 
 
 if __name__ == "__main__":

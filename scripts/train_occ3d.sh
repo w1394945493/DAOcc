@@ -76,6 +76,18 @@ fail() { echo "错误：$*" >&2; exit 1; }
 [[ $MAX_EPOCHS =~ ^[1-9][0-9]*$ ]] || fail 'MAX_EPOCHS 必须为正整数'
 [[ -f $CONFIG ]] || fail "配置不存在：$CONFIG"
 command -v "$PYTHON" >/dev/null || fail "找不到 Python：$PYTHON"
+# Stream configuration keeps the existing launcher, but does not use epoch EMA hooks.
+STREAMING_ENABLED=$("$PYTHON" - "$CONFIG" <<'PYCONFIG'
+import sys
+from torchpack.utils.config import Config
+cfg = Config()
+cfg.load(sys.argv[1], recursive=True)
+print(int(bool(cfg.get('streaming', {}).get('enabled', False))))
+PYCONFIG
+)
+if (( STREAMING_ENABLED )); then
+    [[ $EMA_RESUME == None ]] || fail '流式缓存阶段不使用EMA，请保持EMA_RESUME=None'
+fi
 IFS=',' read -r -a GPU_LIST <<< "$GPUS"
 declare -A SEEN_GPUS=()
 for gpu in "${GPU_LIST[@]}"; do
@@ -161,7 +173,9 @@ if [[ -n $RESUME_FROM ]]; then
     if [[ $name =~ ^epoch_([0-9]+)\.pth$ ]]; then
         EMA_FROM="$(dirname -- "$resolved")/epoch_${BASH_REMATCH[1]}_ema.pth"
     fi
-    if [[ $name =~ ^iter_([0-9]+)\.pth$ ]]; then
+    if (( STREAMING_ENABLED )); then
+        echo '流式续训：恢复权重、优化器和步数；序列采样重新开始，历史缓存清空'
+    elif [[ $name =~ ^iter_([0-9]+)\.pth$ ]]; then
         [[ $EMA_RESUME == None ]] || fail 'iter断点已内嵌EMA，请勿另设EMA_RESUME'
         echo 'EMA：从迭代断点内部同步恢复'
     elif [[ $EMA_RESUME != None ]]; then
@@ -197,7 +211,9 @@ else
     fi
 fi
 
-CMD+=(--custom_hooks.resume "$EMA_RESUME")
+if (( ! STREAMING_ENABLED )); then
+    CMD+=(--custom_hooks.resume "$EMA_RESUME")
+fi
 
 # Torchpack 将 None 解析为 Python 空值，训练入口据此禁用 FP16 Hook。
 if (( FP32 )); then
@@ -207,7 +223,11 @@ else
     echo '精度：沿用 YAML 配置'
 fi
 
-echo "GPU：$GPUS；每卡 batch：$BATCH_SIZE；总 batch：$((NNODES * NPROC_PER_NODE * BATCH_SIZE))；总 epochs：$MAX_EPOCHS"
+if (( STREAMING_ENABLED )); then
+    echo "GPU：$GPUS；每卡 batch：$BATCH_SIZE；流式步数：${MAX_ITERS:-沿用配置runner.max_iters}（MAX_EPOCHS不决定训练上限）"
+else
+    echo "GPU：$GPUS；每卡 batch：$BATCH_SIZE；总 batch：$((NNODES * NPROC_PER_NODE * BATCH_SIZE))；总 epochs：$MAX_EPOCHS"
+fi
 echo "输出目录：$RUN_DIR"
 printf '执行命令：'; printf ' %q' "${CMD[@]}"; printf '\n'
 if (( DRY_RUN )); then

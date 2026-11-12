@@ -44,6 +44,12 @@ def main():
     configs.update(opts)
 
     cfg = Config(recursive_eval(configs), filename=args.config)
+    #*----------------------------------------------------------------------#
+    #* (11.12) 新增流式配置接入：仅显式启用 streaming.enabled 时准备序列数据集和模型配置。
+    # 同时按需注册流式模块；未启用时继续执行原配置构建流程。
+    if cfg.get("streaming", {}).get("enabled", False):
+        from mmdet3d.apis.train_stream import prepare_streaming_config
+        cfg = prepare_streaming_config(cfg)
 
     torch.backends.cudnn.benchmark = cfg.cudnn_benchmark
     if args.dist:

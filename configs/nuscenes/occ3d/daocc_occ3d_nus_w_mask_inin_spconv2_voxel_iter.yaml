@@ -72,7 +72,7 @@ model:
         # with_cp: true
         init_cfg:
           type: Pretrained
-          checkpoint: /home/wangyushen/Data/Weights/daocc/pretrained/resnet50-0676ba61.pth
+          checkpoint: /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth
       neck:
         type: GeneralizedLSSFPN
         in_channels: [512, 1024, 2048]

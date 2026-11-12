@@ -67,10 +67,14 @@ def build_stream_dataloader(dataset, cfg, distributed):
         raise ValueError('Initialized process group requires distributed=True')
     batch_size = cfg.data.samples_per_gpu
     workers = cfg.data.workers_per_gpu
+    #*=============================================================================#
+    #* GroupInBatchSampler
     sampler = GroupInBatchSampler(dataset, batch_size, rank, world_size, cfg.seed)
     dataset.set_epoch(0)  # Infinite stream has no implicit epoch transitions.
     return DataLoader(
-        dataset, batch_sampler=sampler, num_workers=workers,
+        dataset, 
+        batch_sampler=sampler, 
+        num_workers=workers,
         collate_fn=partial(collate, samples_per_gpu=batch_size),
         worker_init_fn=partial(worker_init_fn, num_workers=workers, rank=rank, seed=cfg.seed),
         pin_memory=False,
@@ -120,6 +124,9 @@ def train_stream_model(model, dataset, cfg, distributed=False, validate=False, t
         raise ValueError('Stream LR and checkpoints must use by_epoch: false')
     if cfg.get('debug', False):
         raise ValueError('Epoch-style debug freezing is not supported by the stream runner')
+    
+    #*=============================================================#
+    #* dataloader
     loader = build_stream_dataloader(datasets[0], cfg, distributed)
     logger.info('Sequence training: %d sequence groups, %d frames; history is cached but NOT fused. '
                 'Streaming validation uses current weights and a separate cache.',

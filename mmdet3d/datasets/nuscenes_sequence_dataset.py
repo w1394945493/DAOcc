@@ -46,7 +46,8 @@ class NuScenesSequenceDataset(NuScenesDatasetOccupancy):
                 raise ValueError(f'Non-increasing timestamps in scene {scene}')
             self.sequence_indices.append(indices)
             self.flag[indices] = group
-
+        #*=========================================#
+        #* 将同一场景进一步切分为子序列
         self._split_sequence_groups()
 
     def get_augmentation(self, index=0, rng=None):
@@ -122,6 +123,7 @@ class NuScenesSequenceDataset(NuScenesDatasetOccupancy):
         if data is None:
             raise RuntimeError(f'Pipeline rejected sequence frame {index}; random replacement is forbidden')
         info = self.data_infos[index]
+        
         #* (11.12) 保存当前帧真实使用的 LiDAR 外参和最终增强矩阵（包括随机翻转）。
         # global 位姿由原始标注以 FP64 构造，避免大坐标先转 FP32 后相减损失精度。
         # 使用普通嵌套 list，便于 CPU DataContainer、缓存元数据比较及 JSON 记录。
@@ -144,6 +146,8 @@ class NuScenesSequenceDataset(NuScenesDatasetOccupancy):
                     or not np.allclose(value[3], [0, 0, 0, 1])):
                 raise ValueError(f'Invalid {key} in sequence frame {index}')
             geometry[key] = value.tolist()
+        
+        #*============================================================#
         # 记录实际图像/占据增强矩阵，供跨帧一致性及模型输入核对使用。
         for key in ('img_aug_matrix', 'occ_aug_matrix'):
             if key in data:
@@ -156,6 +160,7 @@ class NuScenesSequenceDataset(NuScenesDatasetOccupancy):
                 if value.shape[-2:] != (4, 4) or not np.isfinite(value).all():
                     raise ValueError(f'Invalid {key} in sequence frame {index}')
                 geometry[key] = value.tolist()
+        
         # Added after Collect3D, so the original pipeline and its output keys stay intact.
         data['stream_metas'] = DataContainer(dict(
             dataset_index=index, scene_token=info['scene_token'], token=info['token'],

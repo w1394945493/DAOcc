@@ -60,7 +60,8 @@ class BEVFeatureWarp(nn.Module):
 
         #* (11.12) 参照 StreamAgg 的逆向采样，补入 DAOcc 的 LiDAR 外参及两帧增强。
         # T = A_prev @ inv(G_prev) @ G_cur @ inv(A_cur), G = ego2global @ lidar2ego。
-        # 位姿组合用 FP64；网格与插值用 FP32，避免混合精度下的坐标量化。
+        #*=============================================================================#
+        #* 位姿组合用 FP64；网格与插值用 FP32，避免混合精度下的坐标量化。
         with torch.cuda.amp.autocast(enabled=False):
             transform = torch.eye(4, device=device, dtype=torch.float64).repeat(batch, 1, 1)
             indices = valid.nonzero(as_tuple=False).flatten()

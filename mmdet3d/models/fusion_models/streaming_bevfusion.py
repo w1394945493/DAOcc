@@ -1,9 +1,10 @@
 """DAOcc streaming adapter with optional StreamOcc-style BEV aggregation."""
 from contextlib import contextmanager
 import torch
-from mmdet3d.models.modules.bev_history_fusion import BEVHistoryFusion
 from mmdet3d.models.builder import FUSIONMODELS
+#*-----------------------------------------------------------#
 #* (11.12) BEV 缓存与对齐组件统一归入模型 utils。
+from mmdet3d.models.fusers.bev_history_fusion import BEVHistoryFusion
 from mmdet3d.models.utils import BEVFeatureCache, BEVFeatureWarp
 from .bevfusion import BEVFusion
 

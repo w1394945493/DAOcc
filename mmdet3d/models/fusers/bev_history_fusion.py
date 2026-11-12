@@ -51,4 +51,4 @@ class BEVHistoryFusion(nn.Module):
                 nn.init.xavier_uniform_(parameter)
 
     def forward(self, current, history):
-        return self.cat_block(torch.cat([self.refine_net(history), current], dim=1))
+        return self.cat_block(torch.cat([self.refine_net(history), current], dim=1)) # (1 512 180 180) (1 512 180 180)

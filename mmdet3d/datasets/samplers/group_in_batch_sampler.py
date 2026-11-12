@@ -32,9 +32,11 @@ class GroupInBatchSampler(Sampler):
         current = [None] * self.batch_size
         positions = [0] * self.batch_size
         instances = [-1] * self.batch_size
+        #*===============================================================================#
         #* (11.12) 沿用 StreamOcc 的每槽位 aug_config；独立 RNG 保证重建迭代器可复现。
         # RNG 位于 sampler 进程，与 DataLoader worker 数量及预取调度无关。
-        augmentation_rngs = [np.random.RandomState((self.seed + slot) % (2 ** 32)) for slot in slots]
+        # 创建的是随机数生成器：每个槽位拥有自己的生成器。它相当于一台“抽签机”，后续调用才会抽出具体参数。
+        augmentation_rngs = [np.random.RandomState((self.seed + slot) % (2 ** 32)) for slot in slots] #* 每个batch槽位维护自己的augmentations[i]
         augmentations = [None] * self.batch_size
         while True:
             batch = []
@@ -43,13 +45,15 @@ class GroupInBatchSampler(Sampler):
                     current[i] = self.groups[next(streams[i])]
                     positions[i] = 0
                     instances[i] += 1
-                    if self.dataset.keep_consistent_seq_aug:
+                    if self.dataset.keep_consistent_seq_aug: # keep_consistent_seq_aug 控制同一子序列内，各帧是否复用同一组几何增强参数：True（当前默认）：子序列开始时随机生成一次，后续帧复用；切换子序列时重新生成。
+                        # get_augmentation() 使用生成器，抽取翻转、旋转、缩放等值，返回具体的增强参数字典，存到 augmentations[i]。
                         augmentations[i] = self.dataset.get_augmentation(
-                            index=current[i][0], rng=augmentation_rngs[i])
+                            index=current[i][0], rng=augmentation_rngs[i]) 
                 position = positions[i]
                 if not self.dataset.keep_consistent_seq_aug:
                     augmentations[i] = self.dataset.get_augmentation(
                         index=current[i][position], rng=augmentation_rngs[i])
+                # 构造每帧请求时：复用已保存的增强参数
                 batch.append(dict(idx=current[i][position], slot=slot,
                                   sequence_start=position == 0,
                                   sequence_instance=instances[i],

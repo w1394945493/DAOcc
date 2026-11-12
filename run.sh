@@ -1203,6 +1203,7 @@ PYTHON=python \
 bash scripts/train_occ3d.sh
 
 #* (11.11)说明：nuScenes 采用CBGS采样策略：训练集 28130 → 123,584 原为原数据集4.39倍
+# total bs=8 epochs=6时，共迭代92688步
 #* FP16混合精度训练的优势：显存占用减少一半，节省训练时间
 #* DAOcc: 使用nuImages上的预训练权重
 # --load_from None \

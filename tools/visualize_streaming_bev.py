@@ -169,7 +169,7 @@ class CacheObserver:
             if meta['slot'] != self.slot_offset + i:
                 raise AssertionError('Input order does not match this rank/global slot')
             group, position, length = self.lookup[meta['dataset_index']]
-            if bool(meta['sequence_start']) != (position == 0):
+            if not self.model._skip_empty_gt_visual_check and bool(meta['sequence_start']) != (position == 0):
                 raise AssertionError('Sequence-start flag does not match dataset group boundary')
             previous = self.previous.get(i)
             expected = previous is not None and not meta['sequence_start']
@@ -203,7 +203,8 @@ class CacheObserver:
                 if not (old['scene_token'] == meta['scene_token']
                         and old['sequence_instance'] == meta['sequence_instance']
                         and previous['group_id'] == group
-                        and previous['position'] + 1 == position
+                        and (previous['position'] < position if self.model._skip_empty_gt_visual_check
+                             else previous['position'] + 1 == position)
                         and old['timestamp'] < meta['timestamp']):
                     raise AssertionError(f'Slot {i}: frames are not consecutive in the same subsequence')
                 if self.model.bev_cache.metas[i] != old:
@@ -234,7 +235,9 @@ class CacheObserver:
                         or alignment['valid_mask'][i].any().item()):
                     raise AssertionError(f'Slot {i}: invalid history produced valid warped pixels')
             if previous is not None and meta['sequence_start']:
-                if meta['sequence_instance'] != previous['current']['sequence_instance'] + 1:
+                if (meta['sequence_instance'] <= previous['current']['sequence_instance']
+                        or (not self.model._skip_empty_gt_visual_check
+                            and meta['sequence_instance'] != previous['current']['sequence_instance'] + 1)):
                     raise AssertionError(f'Slot {i}: sequence instance did not advance')
                 self.transitions[i] = self.transitions.get(i, 0) + 1
             current_hash, current_heat = signature(current[i])
@@ -428,6 +431,8 @@ def run_split(cfg, args, root, split):
                            for group, indices in groups.items()
                            for position, index in enumerate(indices)}
     original = model.process_history
+    #* (11.12) 跳空帧时允许帧位置及全空子序列编号有间隔；请求仍与 sampler 逐项核对。
+    model._skip_empty_gt_visual_check = bool(getattr(dataset, 'skip_empty_gt', False) and split == 'train')
 
     def capture(this, current, history, valid):
         observer.capture(current, history, valid)

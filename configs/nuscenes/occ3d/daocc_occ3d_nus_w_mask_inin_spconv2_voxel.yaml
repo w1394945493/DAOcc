@@ -48,7 +48,7 @@ model: # 模型结构；type 由对应注册器查找并构建
       backbone: # 特征提取骨干
         type: SparseEncoderSpconv2 # 模块/算法类型名；由对应构建器创建
         in_channels: 5 # 每个点/体素的输入特征维数（此数据管线为 XYZ、强度、时间差）
-        sparse_shape: [ 1440, 1440, 41 ] # 稀疏网格 [X, Y, Z]；本实现内部转换为 spconv2 的 [Z, Y, X]
+        sparse_shape: [ 1440, 1440, 41 ] # 稀疏网格 [X, Y, Z]；本实现内部转换为 spconv2 的 [Z, Y, X] 体素划分为40层,backbone 配置的稀疏网格高度是 41。这是编码器预留的额外网格位置，不代表体素化额外生成了一层点。
         output_channels: 128 # 输出稀疏特征通道数；高度维折叠到 BEV 后通道数还会增加
         order: # 卷积模块执行顺序：卷积 → 归一化 → 激活
           - conv
@@ -62,7 +62,7 @@ model: # 模型结构；type 由对应注册器查找并构建
         encoder_paddings: # 与各阶段各块对应的卷积 padding；三元组沿配置的 XYZ 轴
           - [ 0, 0, 1 ]
           - [ 0, 0, 1 ]
-          - [ 0, 0, [ 1, 1, 0 ] ]
+          - [ 0, 0, [ 1, 1, 0 ] ] # 第三个 stage 的配置：最后的 [1,1,0] 表示下采样卷积的 XYZ padding：XY 为 1，Z 为 0。前两个 0 并不是残差块实际采用的 padding；当前残差块内部固定 padding=1。
           - [ 0, 0 ]
         block_type: basicblock # 稀疏残差基本块类型
     camera: # 多相机图像分支

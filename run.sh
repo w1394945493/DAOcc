@@ -1318,9 +1318,26 @@ CUDA_VISIBLE_DEVICES=0,2 torchrun \
   --optimizer.lr 2.0e-4 \
   --checkpoint_config.max_keep_ckpts 1
 
-# 验证是否由于流式训练流程本身导致训练出现NaN  
+# 是否跳过过滤后没有有效检测 GT 框的帧。
+# True：当前槽位顺次取下一帧；False：保留空 GT 帧。
+# --data.train.dataset.skip_empty_gt True \
+
+# 是否启用历史 BEV 的 RefineNet 细化及与当前 BEV 的融合。
+# False：不做细化和融合；历史缓存是否保存由 cache_enabled 控制。
 # --streaming.history_fusion.enabled False \
+
+# 是否在同一子序列内复用几何增强参数。
+# True：段内一致；False：每帧独立采样。
+# 不要求 GridMask、点打乱等随机操作一致。
+# --data.train.dataset.keep_consistent_seq_aug True \
+
+# 是否根据位姿及增强矩阵，将历史 BEV 对齐到当前帧坐标系。
+# True：执行 BEV warp；False：不执行空间对齐。
 # --streaming.bev_warp.enabled False \
+
+# all: 完全随机打乱
+# --data.train.dataset.sequences_split_num all \
+
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 NUM_FRAMES=28130
@@ -1330,16 +1347,52 @@ GPUS=2
 EPOCHS=24
 MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
 INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
-CUDA_VISIBLE_DEVICES=0,2 torchrun \
+CUDA_VISIBLE_DEVICES=6,7 torchrun \
   --standalone \
   --nnodes=1 \
   --nproc_per_node="$GPUS" \
   tools/dist_train.py \
   configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
   --launcher pytorch \
-  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_cache_only \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_cache_only_fp32 \
   --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.train.dataset.skip_empty_gt True \
   --streaming.history_fusion.enabled False \
+  --data.train.dataset.keep_consistent_seq_aug True \
+  --streaming.bev_warp.enabled False \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1 \
+  --fp16 None
+
+# 完全随机打乱单帧组：
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+CUDA_VISIBLE_DEVICES=5,7 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_cache_only_frame_shuffle \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.train.dataset.sequences_split_num all \
+  --data.train.dataset.skip_empty_gt True \
+  --streaming.history_fusion.enabled False \
+  --data.train.dataset.keep_consistent_seq_aug False \
   --streaming.bev_warp.enabled False \
   --data.samples_per_gpu "$BATCH_SIZE" \
   --data.workers_per_gpu "$NUM_WORKERS" \
@@ -1350,14 +1403,64 @@ CUDA_VISIBLE_DEVICES=0,2 torchrun \
   --optimizer.lr 2.0e-4 \
   --checkpoint_config.max_keep_ckpts 1 
 
+# 子序列流式训练；启用以子序列为单位的CBGS重采样；跳过无GT框的帧；子序列内数据增强一致性；历史信息仅缓存；混合精度训练
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+CUDA_VISIBLE_DEVICES=6,7 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_cache_only_cbgs \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.train.dataset.sequence_cbgs True \
+  --data.train.dataset.skip_empty_gt True \
+  --data.train.dataset.keep_consistent_seq_aug True \
+  --streaming.history_fusion.enabled False \
+  --streaming.bev_warp.enabled False \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1 \
+
+
+
 #* 评估
+# --save-predictions # 保存逐帧预测结果
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 CUDA_VISIBLE_DEVICES=0 python tools/test.py \
   configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
-  /你的路径/iter_xxx.pth \
+  /home/wangyushen/Data/Outputs/daocc/train/stream_daocc/w_mask/train_cache_only/iter_3517.pth \
   --out-dir /home/wangyushen/Data/Outputs/daocc/outputs/stream_eval \
+  --save-predictions \
   --cfg-options \
   streaming.history_fusion.enabled=False \
   streaming.bev_warp.enabled=False
+
+# * 可视化：直接可视化此前的预测结果
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+python tools/visualize.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --mode pred \
+  --split val \
+  --pred-dir /home/wangyushen/Data/Outputs/daocc/outputs/stream_eval \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/outputs/stream_eval_vis \
+  --bbox-thickness 2 \
+  --data.workers_per_gpu 2
 
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
@@ -1370,3 +1473,35 @@ CUDA_VISIBLE_DEVICES=0,2 torchrun \
   --dist \
   --launcher pytorch \
   --out-dir /home/wangyushen/Data/Outputs/daocc/outputs/stream_eval
+
+# 查看图中被过滤的帧:无GT框
+python tools/analyze_empty_gt.py \
+  --out /home/wangyushen/Data/Outputs/daocc/empty_gt_check/report.json \
+  --vis-dir /home/wangyushen/Data/Outputs/daocc/empty_gt_check/images \
+  --vis-count 8
+
+#=============================================================================#
+# 统计 CBGS 前后的类别出现帧数、框数量、比例，以及每帧重复采样次数；同时提供范围过滤后的 GT 统计。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+python tools/analyze_cbgs_sampling.py \
+  --seed 0 \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/analysis/cbgs
+
+# 沿用当前子序列切分规则，默认跳过空 GT，统计每段各类别的出现帧数、帧占比、累计框数和单帧最大框数。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+python tools/analyze_sequence_sampling.py \
+  --sequences-split-num 2 \
+  --cbgs \
+  --seed 0 \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/analysis/sequences
+#===========================================================#
+# 分析比较 原始数据集，单帧CBGS重采样，子序列CBGS重采样结果
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+python tools/compare_training_sampling.py \
+  --seed 0 \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/analysis/sampling_comparison

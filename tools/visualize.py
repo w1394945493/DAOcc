@@ -44,13 +44,14 @@ def recursive_eval(obj, globals=None):
 
 
 
-# Occ3D 的 0～17 类颜色；17 为 free，255 为忽略区域，不绘制空体素。
+#* (11.12) 与 tools/vis_occ3d.py 的语义类别 0～16 配色一致。
+# 不直接导入该脚本，避免其 Qt 环境配置影响无窗口批量导图。
 OCC_COLORS = np.array([
-    [0, 0, 0], [112, 128, 144], [220, 20, 60], [255, 69, 0],
-    [255, 158, 0], [233, 150, 70], [255, 61, 99], [0, 0, 230],
-    [47, 79, 79], [255, 140, 0], [255, 99, 71], [0, 207, 191],
-    [175, 0, 75], [75, 0, 75], [112, 180, 60], [222, 184, 135],
-    [0, 175, 0], [255, 255, 255],
+    [0, 0, 0], [255, 120, 50], [255, 192, 203], [255, 255, 0],
+    [0, 150, 245], [0, 255, 255], [200, 180, 0], [255, 0, 0],
+    [255, 240, 150], [135, 60, 0], [160, 32, 240], [255, 0, 255],
+    [139, 137, 137], [75, 0, 75], [150, 240, 80], [230, 230, 250],
+    [0, 175, 0],
 ], dtype=np.uint8)
 
 
@@ -63,50 +64,41 @@ def save_occupancy_array(path, occupancy):
     np.save(path, np.asarray(occupancy))
 
 
-# 保留三维渲染函数供后续使用，当前主流程只导出 npy，不调用该函数。
-
-def render_occupancy(path, occupancy, title):
-    # 使用无窗口绘图后端，将占用体素的外露表面绘制为三维彩色网格。
-    # 相邻占用体素的内部面不绘制，减少全量体素绘制的时间和内存开销。
-    from matplotlib.figure import Figure
-    from matplotlib.backends.backend_agg import FigureCanvasAgg
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+#* (11.12) 正上方俯视投影：每个 XY 格选最高可见体素；预测和 GT 同图比较。
+def occupancy_top_view(occupancy):
     if torch.is_tensor(occupancy):
         occupancy = occupancy.detach().cpu().numpy()
     occupancy = np.asarray(occupancy)
     if occupancy.shape != (200, 200, 16):
         raise ValueError(f"Expected Occ3D shape (200, 200, 16), got {occupancy.shape}")
-    occupied = (occupancy >= 0) & (occupancy < 17)
-    faces, colors = [], []
-    # Occ3D 坐标范围为 x/y [-40,40]、z [-1,5.4]，体素边长 0.4 米。
-    origin = np.array([-40., -40., -1.])
-    for axis in range(3):
-        other = [a for a in range(3) if a != axis]
-        for side in (-1, 1):
-            neighbor = np.roll(occupied, -side, axis=axis)
-            boundary = [slice(None)] * 3
-            boundary[axis] = -1 if side == 1 else 0
-            neighbor[tuple(boundary)] = False
-            positions = np.argwhere(occupied & ~neighbor)
-            corners = np.zeros((4, 3))
-            corners[:, axis] = int(side == 1)
-            corners[:, other[0]] = [0, 1, 1, 0]
-            corners[:, other[1]] = [0, 0, 1, 1]
-            faces.append((positions[:, None, :] + corners) * 0.4 + origin)
-            colors.append(OCC_COLORS[occupancy[tuple(positions.T)].astype(int)] / 255.)
-    fig = Figure(figsize=(10, 9), dpi=120)
+    visible = (occupancy > 0) & (occupancy < 17)
+    has_voxel = visible.any(axis=2)
+    top_z = occupancy.shape[2] - 1 - visible[:, :, ::-1].argmax(axis=2)
+    labels = np.take_along_axis(occupancy, top_z[..., None], axis=2)[..., 0]
+    rgb = np.full((200, 200, 3), 255, dtype=np.uint8)
+    rgb[has_voxel] = OCC_COLORS[labels[has_voxel].astype(np.int64)]
+    # 数组轴为 X,Y,Z；imshow 的列为 X、行为 Y。
+    return rgb.transpose(1, 0, 2)
+
+
+def render_occupancy_comparison(path, prediction, ground_truth, title):
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    panels = [('Prediction', prediction), ('Ground truth', ground_truth)]
+    fig = Figure(figsize=(13, 6.5), dpi=120)
     FigureCanvasAgg(fig)
-    ax = fig.add_subplot(111, projection="3d")
-    if occupied.any():
-        ax.add_collection3d(Poly3DCollection(
-            np.concatenate(faces), facecolors=np.concatenate(colors),
-            edgecolors="none", linewidths=0,
-        ))
-    ax.set(xlim=(-40, 40), ylim=(-40, 40), zlim=(-1, 5.4),
-           xlabel="X (m)", ylabel="Y (m)", zlabel="Z (m)", title=title)
-    ax.set_box_aspect((80, 80, 6.4))
-    ax.view_init(elev=35, azim=-60)
-    fig.tight_layout()
+    for i, (label, occupancy) in enumerate(panels, 1):
+        ax = fig.add_subplot(1, 2, i)
+        if occupancy is not None:
+            ax.imshow(occupancy_top_view(occupancy), origin='lower',
+                      extent=(-40, 40, -40, 40), interpolation='nearest')
+        else:
+            ax.text(0, 0, 'Not available', ha='center', va='center')
+        ax.set(xlim=(-40, 40), ylim=(-40, 40), xlabel='Ego X (m)',
+               ylabel='Ego Y (m)', title=label)
+        ax.set_aspect('equal')
+    fig.suptitle(title + '\nTop view: highest visible voxel; classes 0, 17 and 255 hidden')
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
     mmcv.mkdir_or_exist(os.path.dirname(path))
     fig.savefig(path)
     fig.clear()
@@ -188,10 +180,45 @@ def main() -> None:
     if args.mode == "pred" and not args.pred_dir:
         torch.cuda.set_device(0)
 
-    # build the dataloader
-    dataset = build_dataset(cfg.data[args.split])
+    #* (11.12) 可视化加载器固定 BS=1，samples_per_gpu 不属于数据集构造参数。
+    # 离线绘图按 token 读取已保存预测，不需要序列采样和增强一致性配置。
+    dataset_cfg = copy.deepcopy(cfg.data[args.split])
+
+    def prepare_visual_dataset(config):
+        if isinstance(config, list):
+            for child in config:
+                prepare_visual_dataset(child)
+            return
+        config.pop('samples_per_gpu', None)
+        if config.get('type') in ('NuScenesDatasetOccupancy', 'NuScenesSequenceDataset'):
+            config.pop('sequences_split_num', None)
+            config.pop('keep_consistent_seq_aug', None)
+            if config['type'] == 'NuScenesSequenceDataset':
+                config['type'] = 'NuScenesDatasetOccupancy'
+        if 'dataset' in config:
+            prepare_visual_dataset(config['dataset'])
+        if 'datasets' in config:
+            prepare_visual_dataset(config['datasets'])
+
+    prepare_visual_dataset(dataset_cfg)
+    #* (11.12) 流式权重必须先按序列推理保存，避免本入口退回单帧模型而忽略融合权重。
+    if (cfg.get('streaming', {}).get('enabled', False)
+            and args.mode == 'pred' and not args.pred_dir):
+        parser.error('流式模型请先用 tools/test.py --save-predictions，再用 --pred-dir 可视化')
+    dataset = build_dataset(dataset_cfg)
+    #* (11.12) 在加载图像、点云及标注之前筛选帧，避免先遍历完整验证集再跳过。
+    # interval 仍按原数据集索引计算；预测通过 token 匹配，无需连续读取历史帧。
+    selected_indices = list(range(0, len(dataset), args.interval))
+    if args.pred_dir:
+        infos = getattr(dataset, 'data_infos', None)
+        if infos is None or len(infos) != len(dataset):
+            raise ValueError('Offline prediction visualization requires dataset.data_infos for token lookup')
+        selected_indices = [i for i in selected_indices
+                            if infos[i]['token'] in prediction_files]
+    print(f'Visualizing {len(selected_indices)}/{len(dataset)} frames (interval={args.interval})')
+    selected_dataset = torch.utils.data.Subset(dataset, selected_indices)
     dataflow = build_dataloader(
-        dataset,
+        selected_dataset,
         samples_per_gpu=1,
         workers_per_gpu=cfg.data.workers_per_gpu,
         # 此脚本使用单进程可视化，避免分布式采样遗漏帧。
@@ -217,11 +244,7 @@ def main() -> None:
         model = MMDataParallel(model.cuda(), device_ids=[0])
         model.eval()
 
-    frame_id = -1
     for data in tqdm(dataflow):
-        frame_id += 1
-        if frame_id % args.interval != 0:
-            continue
         metas = data["metas"].data[0][0]
         name = "{}-{}".format(metas["timestamp"], metas["token"])
 
@@ -281,18 +304,19 @@ def main() -> None:
         else:
             masks = None
 
-        # 恢复导出 occupancy 数组，供 vis_occ3d.py 进行交互式三维可视化。
-        # 预测保存为 <name>.npy，真值保存为 <name>_gt.npy；不再调用三维 PNG 渲染。
-        if args.mode == "pred" and "occ_pred" in outputs[0]:
+        #* (11.12) OCC 图片与原始数组分目录，预测和 GT 合为一幅俯视图。
+        occ_pred = outputs[0].get('occ_pred') if args.mode == 'pred' else None
+        occ_gt = data['voxel_semantics'][0] if 'voxel_semantics' in data else None
+        if occ_pred is not None:
             save_occupancy_array(
-                os.path.join(frame_out_dir, "occ", f"{name}.npy"),
-                outputs[0]["occ_pred"],
-            )
-        if "voxel_semantics" in data:
+                os.path.join(frame_out_dir, 'occ', 'npy', f'{name}.npy'), occ_pred)
+        if occ_gt is not None:
             save_occupancy_array(
-                os.path.join(frame_out_dir, "occ", f"{name}_gt.npy"),
-                data["voxel_semantics"][0],
-            )
+                os.path.join(frame_out_dir, 'occ', 'npy', f'{name}_gt.npy'), occ_gt)
+        if occ_pred is not None or occ_gt is not None:
+            render_occupancy_comparison(
+                os.path.join(frame_out_dir, 'occ', 'images', f'{name}.png'),
+                occ_pred, occ_gt, name)
 
         # 原逐相机保存改为内存绘制后拼接，不再创建 camera-0～camera-5 目录。
         if "img" in data:

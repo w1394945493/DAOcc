@@ -1,5 +1,5 @@
 # Independent sequence-training configuration, copied from the sibling spconv2_voxel baseline.
-# Entry prepares the inherited CBGS child as NuScenesSequenceDataset (no CBGS).
+# Entry unwraps frame-level CBGS; optional sequence CBGS is disabled by default.
 # DAOcc prediction heads consume BEV features fused with aligned history.
 # 21096 steps is an explicit example budget (~6 passes at 28130 frames/global batch 8).
 # Override runner.max_iters for your actual batch/world size. No implicit epoch schedule.
@@ -19,8 +19,12 @@ data:
       #* (11.12) 与 StreamOcc 主训练配置一致：每个 scene 切成两个连续子序列。
       # prepare_streaming_config 解开 CBGS 包装时，将此参数一并传给序列 Dataset。
       sequences_split_num: 2
+      #* (11.13) 整段有放回 CBGS；段内有序，不自动扩大训练步数。
+      sequence_cbgs: false
       #* (11.12) StreamOcc 同名开关：true 子序列内几何增强一致，false 每帧独立增强。
       keep_consistent_seq_aug: true
+      #* (11.12) 空检测 GT 顺序跳过；验证集不跳帧。
+      skip_empty_gt: true
       ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_train.pkl
   val:
     #* (11.12) 与 StreamOcc 训练中验证一致：每卡 BS=1，完整连续序列，不切训练子序列。

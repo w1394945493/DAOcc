@@ -6,12 +6,14 @@ from pyquaternion import Quaternion
 from mmcv.parallel import DataContainer
 from mmdet.datasets import DATASETS
 from .nuscenes_occupancy_dataset import NuScenesDatasetOccupancy
-from .pipelines.transforms_3d import ImageAug3D, GlobalRotScaleTrans, RandomFlip3D
+from .pipelines.transforms_3d import (ImageAug3D, GlobalRotScaleTrans, RandomFlip3D,
+                                    ObjectRangeFilter, ObjectNameFilter)
 
 
 @DATASETS.register_module()
 class NuScenesSequenceDataset(NuScenesDatasetOccupancy):
-    def __init__(self, *args, sequences_split_num=1, keep_consistent_seq_aug=True, **kwargs):
+    def __init__(self, *args, sequences_split_num=1, keep_consistent_seq_aug=True,
+                 skip_empty_gt=False, sequence_cbgs=False, **kwargs):
         #* (11.12) 沿用 StreamOcc 的参数：1 不切分，整数 K 按每场景 K 段切分，"all" 每帧一组。
         # 默认值与 StreamOcc Dataset 一致；不引入按固定帧数切分的另一套参数。
         self.sequences_split_num = sequences_split_num
@@ -19,6 +21,13 @@ class NuScenesSequenceDataset(NuScenesDatasetOccupancy):
         if not isinstance(keep_consistent_seq_aug, (bool, np.bool_)):
             raise TypeError('keep_consistent_seq_aug must be a boolean')
         self.keep_consistent_seq_aug = bool(keep_consistent_seq_aug)
+        #* (11.12) 由 sampler 顺序跳过空 GT，禁止 worker 隐式换帧。
+        self.skip_empty_gt = bool(skip_empty_gt)
+        #*--------------------------------------------------#
+        #* (11.13) 可选子序列 CBGS，只改变训练时整段的抽样机会。
+        if not isinstance(sequence_cbgs, (bool, np.bool_)):
+            raise TypeError('sequence_cbgs must be a boolean')
+        self.sequence_cbgs = bool(sequence_cbgs)
         kwargs.update(filter_empty_gt=False, resample=False)
         super().__init__(*args, **kwargs)
         self._stream_aug_transforms = []
@@ -49,6 +58,66 @@ class NuScenesSequenceDataset(NuScenesDatasetOccupancy):
         #*=========================================#
         #* 将同一场景进一步切分为子序列
         self._split_sequence_groups()
+        #* (11.12) 每个训练进程初始化时检查一次；验证不预计算、不跳帧。
+        self.sequence_class_presence = None
+        self.has_gt_flags = self._precompute_training_gt() if (
+            (self.skip_empty_gt or self.sequence_cbgs) and not self.test_mode) else None
+
+    #* (11.12) 原逐候选帧增强检查保留为注释，当前改为初始化预计算。
+    # def has_training_gt(self, index, aug_config):
+    #     """Check GT using the same geometric transforms and filters as the pipeline.
+    #
+    #     Runs in the sampler on CPU, without loading images/points/occupancy.
+    #     The worker checks the final labels again to catch unsupported pipeline changes.
+    #     """
+    #     data = deepcopy(self.get_ann_info(index))
+    #     data.update(aug_config=deepcopy(aug_config),
+    #                 lidar_aug_matrix=np.eye(4, dtype=np.float32),
+    #                 occ_aug_matrix=np.eye(4, dtype=np.float32))
+    #     for transform in self.pipeline.transforms:
+    #         if isinstance(transform, (GlobalRotScaleTrans, RandomFlip3D,
+    #                                   ObjectRangeFilter, ObjectNameFilter)):
+    #             data = transform(data)
+    #     return bool((data['gt_labels_3d'] != -1).any())
+    #
+
+    def _precompute_training_gt(self):
+        """Cache eligibility only when geometry cannot change range membership."""
+        transforms = self.pipeline.transforms
+        has_flip = any(isinstance(t, RandomFlip3D) for t in transforms)
+        for transform in transforms:
+            if isinstance(transform, GlobalRotScaleTrans) and transform.is_train:
+                if (not np.all(np.asarray(transform.resize_lim) == 1)
+                        or not np.all(np.asarray(transform.rot_lim) == 0)
+                        or not np.all(np.asarray(transform.trans_lim) == 0)):
+                    raise ValueError('skip_empty_gt precomputation requires identity scale/rotation/translation')
+            if isinstance(transform, ObjectRangeFilter) and has_flip:
+                bounds = transform.pcd_range
+                if not (bounds[0] == -bounds[3] and bounds[1] == -bounds[4]):
+                    raise ValueError('skip_empty_gt precomputation with flips requires symmetric XY bounds')
+        filters = [t for t in transforms if isinstance(t, (ObjectRangeFilter, ObjectNameFilter))]
+        flags = np.empty(len(self.data_infos), dtype=np.bool_)
+        #* (11.13) 与空帧预计算共用过滤后的标签，避免重复扫描标注。
+        presence = (np.zeros((len(self.sequence_indices), len(self.CLASSES)), dtype=bool)
+                    if self.sequence_cbgs else None)
+        for index in range(len(flags)):
+            data = deepcopy(self.get_ann_info(index))
+            for transform in filters:
+                data = transform(data)
+            flags[index] = bool((data['gt_labels_3d'] != -1).any())
+            if presence is not None:
+                #* (11.13) 空标注可能生成 float64 空数组，索引前统一为整数。
+                labels = np.asarray(data['gt_labels_3d'], dtype=np.int64)
+                presence[self.flag[index], labels[labels >= 0]] = True
+        if not flags.any():
+            raise ValueError('No nonempty training GT remains after filtering')
+        flags.setflags(write=False)
+        if presence is not None:
+            presence.setflags(write=False)
+            self.sequence_class_presence = presence
+        from mmdet3d.utils import get_root_logger
+        get_root_logger().info('Precomputed training GT: %d valid / %d frames, %d empty skipped', int(flags.sum()), len(flags), int((~flags).sum()))
+        return flags
 
     def get_augmentation(self, index=0, rng=None):
         """Sample explicit 2D/3D geometry using existing DAOcc pipeline ranges.
@@ -122,6 +191,13 @@ class NuScenesSequenceDataset(NuScenesDatasetOccupancy):
             data = self.pipeline(input_dict)
         if data is None:
             raise RuntimeError(f'Pipeline rejected sequence frame {index}; random replacement is forbidden')
+        #* (11.12) 验证 sampler 的标注预检查与实际流水线一致，不在 worker 中继续取帧。
+        if not self.test_mode and self.skip_empty_gt:
+            labels = data['gt_labels_3d']
+            if isinstance(labels, DataContainer):
+                labels = labels.data
+            if not bool((labels != -1).any()):
+                raise RuntimeError(f'GT precheck/pipeline mismatch at frame {index}; check GT-changing transforms')
         info = self.data_infos[index]
         
         #* (11.12) 保存当前帧真实使用的 LiDAR 外参和最终增强矩阵（包括随机翻转）。

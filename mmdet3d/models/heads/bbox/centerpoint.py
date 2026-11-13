@@ -625,7 +625,7 @@ class CenterHead(BaseModule):
         for task_id, preds_dict in enumerate(preds_dicts):
             # heatmap focal loss
             preds_dict[0]["heatmap"] = clip_sigmoid(preds_dict[0]["heatmap"])
-            num_pos = heatmaps[task_id].eq(1).float().sum().item()
+            num_pos = heatmaps[task_id].eq(1).float().sum().item() # (1) 当前任务在整个 batch 中的正样本数。即使为 0，归一化分母也取 1。
             loss_heatmap = self.loss_cls(
                 preds_dict[0]["heatmap"], heatmaps[task_id], avg_factor=max(num_pos, 1)
             )
@@ -665,8 +665,8 @@ class CenterHead(BaseModule):
             code_weights = self.train_cfg.get("code_weights", None)
             bbox_weights = mask * mask.new_tensor(code_weights)
             loss_bbox = self.loss_bbox(
-                pred, target_box, bbox_weights, avg_factor=(num + 1e-4)
-            )
+                pred, target_box, bbox_weights, avg_factor=(num + 1e-4) 
+            ) # (2) 即使有效目标数量 num=0，分母仍为 1e-4。这两处只防止“目标数量为零导致除零”，不能防止预测或标签已经含 NaN/Inf，也不能保证空目标 batch 的所有计算都数值稳定。
             loss_dict[f"heatmap/task{task_id}"] = loss_heatmap
             loss_dict[f"bbox/task{task_id}"] = loss_bbox
         return loss_dict

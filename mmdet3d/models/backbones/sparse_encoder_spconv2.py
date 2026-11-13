@@ -288,16 +288,22 @@ class SparseEncoderSpconv2(nn.Module):
         ) # 输入：[B,16,1440,1440,41]
         #----------------------------------------------------#
         # 稀疏卷积 
-        # 输入 + conv_input [B,16,1440,1440,41]
-        # Stage 1： 2 BasicBlocks → SparseConv ↓2 → [B,32,720,720,21]
-        # Stage 2： 2 BasicBlocks → SparseConv ↓2 → [B,64,360,360,11]
-        # Stage 3： 2 BasicBlocks → SparseConv ↓2 → [B,128,180,180,5]
-        # Stage 4： 2 BasicBlocks → [B,128,180,180,5]
-        # conv_out + BEV  [B,128,180,180,2] → [B,256,180,180]
+        # 输入 建立稀疏张量	[B,5,1440,1440,41]
+        # conv_input SubMConv，5→16 [B,16,1440,1440,41]
+        # Stage 1：两个 16 通道残差块，再下采样 16→32  (2 BasicBlocks → SparseConv ↓2) → [B,32,720,720,21]
+        # Stage 2：两个 32 通道残差块，再下采样 32→64  (2 BasicBlocks → SparseConv ↓2) → [B,64,360,360,11]
+        # Stage 3：两个 64 通道残差块，再下采样 64→128 (2 BasicBlocks → SparseConv ↓2) → [B,128,180,180,5]
+        # Stage 4：两个 128 通道残差块，不下采样       (2 BasicBlocks)                 → [B,128,180,180,5]   
+        # conv_out 只沿高度下采样，128→128                                            → [B,128,180,180,2]
+        # BEV      高度维度拼接为通道维度                                             →  [B,256,180,180]
+        # SubMConv3d → BN1d → ReLU → SubMConv3d → BN1d → 加回输入 → ReLU
+        # 普通卷积尺寸公式为： 输出 = floor((输入 + 2×padding - kernel_size) / stride) + 1\
+        # 最后：conv_out：kernel=(1,1,3)，stride=(1,1,2)，padding=0 Z：floor((5 - 3)/2) + 1 = 2
         # 说明：中间稀疏张量的实际存储形式为 features: [N_active,C] 和 indices: [N_active,4]；图中的 [B,C,X,Y,Z] 是逻辑网格形状，并非实际稠密存储。
         x = self.conv_input(input_sp_tensor)
         for encoder_layer in self.encoder_layers:
             x = encoder_layer(x)
+        
         # 执行.dense() 后，将稀疏存储的特征转换为完整的稠密网格张量。.dense() 之前：SparseConvTensor 数据以稀疏形式存储
         # spconv2 的稠密张量维度顺序是 [B, C, Z, Y, X]，而不是 [B, C, X, Y, Z]。
         spatial_features = self.conv_out(x).dense()

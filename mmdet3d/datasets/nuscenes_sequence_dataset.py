@@ -13,7 +13,8 @@ from .pipelines.transforms_3d import (ImageAug3D, GlobalRotScaleTrans, RandomFli
 @DATASETS.register_module()
 class NuScenesSequenceDataset(NuScenesDatasetOccupancy):
     def __init__(self, *args, sequences_split_num=1, keep_consistent_seq_aug=True,
-                 skip_empty_gt=False, sequence_cbgs=False, **kwargs):
+                 skip_empty_gt=False, sequence_cbgs=False, skip_prob=0.0,
+                 sequence_flip_prob=0.0, **kwargs):
         #* (11.12) 沿用 StreamOcc 的参数：1 不切分，整数 K 按每场景 K 段切分，"all" 每帧一组。
         # 默认值与 StreamOcc Dataset 一致；不引入按固定帧数切分的另一套参数。
         self.sequences_split_num = sequences_split_num
@@ -28,6 +29,11 @@ class NuScenesSequenceDataset(NuScenesDatasetOccupancy):
         if not isinstance(sequence_cbgs, (bool, np.bool_)):
             raise TypeError('sequence_cbgs must be a boolean')
         self.sequence_cbgs = bool(sequence_cbgs)
+        #* (11.13) StreamOcc 同名时序增强开关，仅训练 sampler 使用。
+        for name, value in [('skip_prob', skip_prob), ('sequence_flip_prob', sequence_flip_prob)]:
+            if not np.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError(name + ' must be in [0, 1]')
+            setattr(self, name, float(value))
         kwargs.update(filter_empty_gt=False, resample=False)
         super().__init__(*args, **kwargs)
         self._stream_aug_transforms = []
@@ -243,6 +249,7 @@ class NuScenesSequenceDataset(NuScenesDatasetOccupancy):
             timestamp=float(info['timestamp']) / 1e6,
             sequence_start=request['sequence_start'], slot=request['slot'],
             sequence_instance=request['sequence_instance'],
+            sequence_direction=request.get('sequence_direction', 1),
             aug_config=aug_config,
             augmentation_mode=('validation' if self.test_mode else
                                'sequence' if self.keep_consistent_seq_aug else 'frame'),

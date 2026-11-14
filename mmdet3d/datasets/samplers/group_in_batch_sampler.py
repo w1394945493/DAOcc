@@ -7,7 +7,9 @@ from torch.utils.data import Sampler
 
 
 class GroupInBatchSampler(Sampler):
-    def __init__(self, dataset, batch_size, rank=0, world_size=1, seed=0):
+    def __init__(self, dataset, batch_size, rank=0, world_size=1, seed=0, diagnostic_callback=None):
+        #* (11.13) 可选只读采样事件，供离线可视化区分随机跳帧与空 GT 过滤。
+        self.diagnostic_callback = diagnostic_callback
         self.dataset = dataset
         self.groups = dataset.sequence_indices
         self.batch_size = int(batch_size)
@@ -19,6 +21,10 @@ class GroupInBatchSampler(Sampler):
         if not 0 <= rank < world_size or any(not group for group in self.groups):
             raise ValueError('Invalid rank or empty sequence')
         self.size = len(dataset)
+        #*===============================================================#
+        #* (11.13) 默认关闭，不消耗原增强 RNG；验证不使用本 sampler。
+        self.skip_prob = getattr(dataset, 'skip_prob', 0.0)
+        self.sequence_flip_prob = getattr(dataset, 'sequence_flip_prob', 0.0)
         #* (11.13) 参照原 CBGS 初始化一次有放回索引；关闭时保留原采样路径。
         self.cbgs_group_indices = None
         self._cbgs_rng_state = None
@@ -72,6 +78,9 @@ class GroupInBatchSampler(Sampler):
         positions = [0] * self.batch_size
         instances = [-1] * self.batch_size
         emitted = [False] * self.batch_size
+        directions = [1] * self.batch_size
+        temporal_rngs = [np.random.RandomState((self.seed + slot + 104729) % (2 ** 32))
+                         for slot in slots]
         #*===============================================================================#
         #* (11.12) 沿用 StreamOcc 的每槽位 aug_config；独立 RNG 保证重建迭代器可复现。
         # RNG 位于 sampler 进程，与 DataLoader worker 数量及预取调度无关。
@@ -81,12 +90,25 @@ class GroupInBatchSampler(Sampler):
         while True:
             batch = []
             for i, slot in enumerate(slots):
+                #* (11.13) 与 StreamOcc 一样每次输出至多随机额外跳一帧。
+                # 仅已输出过首帧且至少剩两帧时跳过；空 GT 过滤仍按读取方向继续。
+                if (self.skip_prob > 0 and emitted[i] and current[i] is not None
+                        and len(current[i]) - positions[i] > 1
+                        and temporal_rngs[i].rand() < self.skip_prob):
+                    if self.diagnostic_callback is not None:
+                        self.diagnostic_callback(dict(reason='random_skip', idx=current[i][positions[i]],
+                                                      slot=slot, sequence_instance=instances[i]))
+                    positions[i] += 1
                 #* (11.12) 空 GT 只推进当前槽位，不改变其他槽位和 worker 内索引。
                 # 首个实际输出帧标为 sequence_start；整段为空则继续下一段。
                 attempts = 0
                 while True:
                     if current[i] is None or positions[i] == len(current[i]):
                         current[i] = self.groups[next(streams[i])]
+                        directions[i] = (-1 if self.sequence_flip_prob > 0
+                                         and temporal_rngs[i].rand() < self.sequence_flip_prob else 1)
+                        if directions[i] == -1:
+                            current[i] = current[i][::-1]
                         positions[i] = 0
                         instances[i] += 1
                         emitted[i] = False
@@ -103,6 +125,9 @@ class GroupInBatchSampler(Sampler):
                     #* (11.12) 原逐帧检查保留；现在只查询初始化时计算的布尔标记。
                     # if (self.dataset.skip_empty_gt and not self.dataset.has_training_gt(index, augmentations[i])):
                     if self.dataset.skip_empty_gt and not self.dataset.has_gt_flags[index]:
+                        if self.diagnostic_callback is not None:
+                            self.diagnostic_callback(dict(reason='empty_gt', idx=index,
+                                                          slot=slot, sequence_instance=instances[i]))
                         attempts += 1 # 这一帧没有GT
                         if attempts >= self.size:
                             raise RuntimeError('No nonempty GT found after a dataset-sized sequential search')
@@ -112,6 +137,7 @@ class GroupInBatchSampler(Sampler):
                     batch.append(dict(idx=index, slot=slot,
                                       sequence_start=not emitted[i],
                                       sequence_instance=instances[i],
+                                      sequence_direction=directions[i],
                                       aug_config=deepcopy(augmentations[i])))
                     
                     emitted[i] = True

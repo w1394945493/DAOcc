@@ -169,7 +169,9 @@ class CacheObserver:
             if meta['slot'] != self.slot_offset + i:
                 raise AssertionError('Input order does not match this rank/global slot')
             group, position, length = self.lookup[meta['dataset_index']]
-            if not self.model._skip_empty_gt_visual_check and bool(meta['sequence_start']) != (position == 0):
+            #* (11.13) 首帧边界随读取方向变化，跳帧允许位置间隔大于一。
+            direction = meta.get('sequence_direction', 1)
+            if not self.model._skip_empty_gt_visual_check and bool(meta['sequence_start']) != (position == (0 if direction == 1 else length - 1)):
                 raise AssertionError('Sequence-start flag does not match dataset group boundary')
             previous = self.previous.get(i)
             expected = previous is not None and not meta['sequence_start']
@@ -203,9 +205,11 @@ class CacheObserver:
                 if not (old['scene_token'] == meta['scene_token']
                         and old['sequence_instance'] == meta['sequence_instance']
                         and previous['group_id'] == group
-                        and (previous['position'] < position if self.model._skip_empty_gt_visual_check
-                             else previous['position'] + 1 == position)
-                        and old['timestamp'] < meta['timestamp']):
+                        and old.get('sequence_direction', 1) == direction
+                        and ((position - previous['position']) * direction > 0
+                             if self.model._skip_empty_gt_visual_check or self.model._temporal_skip_visual_check
+                             else (position - previous['position']) * direction == 1)
+                        and (meta['timestamp'] - old['timestamp']) * direction > 0):
                     raise AssertionError(f'Slot {i}: frames are not consecutive in the same subsequence')
                 if self.model.bev_cache.metas[i] != old:
                     raise AssertionError(f'Slot {i}: cache source metadata mismatch')
@@ -433,6 +437,7 @@ def run_split(cfg, args, root, split):
     original = model.process_history
     #* (11.12) 跳空帧时允许帧位置及全空子序列编号有间隔；请求仍与 sampler 逐项核对。
     model._skip_empty_gt_visual_check = bool(getattr(dataset, 'skip_empty_gt', False) and split == 'train')
+    model._temporal_skip_visual_check = bool(getattr(dataset, 'skip_prob', 0) > 0 and split == 'train')
 
     def capture(this, current, history, valid):
         observer.capture(current, history, valid)

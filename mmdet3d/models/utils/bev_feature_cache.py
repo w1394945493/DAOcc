@@ -23,7 +23,10 @@ class BEVFeatureCache:
                  and cur['slot'] == old['slot']
                  and cur['sequence_instance'] == old['sequence_instance']
                  and cur['scene_token'] == old['scene_token']
-                 and cur['timestamp'] > old['timestamp']
+                 #* (11.13) 反序仅允许显式 direction=-1 的同实例历史；默认仍严格正序。
+                 and cur.get('sequence_direction', 1) in (-1, 1)
+                 and cur.get('sequence_direction', 1) == old.get('sequence_direction', 1)
+                 and (cur['timestamp'] - old['timestamp']) * cur.get('sequence_direction', 1) > 0
                  for cur, old in zip(metas, self.metas)]
         self.valid = torch.tensor(valid, dtype=torch.bool, device=self.bev.device)
         # Invalid slots are explicitly zeroed and must also be masked by future fusion.

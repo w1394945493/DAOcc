@@ -1232,8 +1232,8 @@ python -m torch.distributed.run \
   --evaluation.interval 3862 \
   --max_keep_ckpt 1
 
-#*=======================================================================#
-#* 流式训练
+#*==============================================================================================================#
+#* (11.12) 流式训练
 # 可视化验证流式训练数据集处理是否正确
 # --cfg-options data.train.dataset.keep_consistent_seq_aug=False  # 可选：子序列
 conda activate daocc-cu121
@@ -1370,39 +1370,8 @@ CUDA_VISIBLE_DEVICES=6,7 torchrun \
   --checkpoint_config.max_keep_ckpts 1 \
   --fp16 None
 
-# 完全随机打乱单帧组：
-conda activate daocc-cu121
-cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
-NUM_FRAMES=28130
-BATCH_SIZE=4
-NUM_WORKERS=4
-GPUS=2
-EPOCHS=24
-MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
-INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
-CUDA_VISIBLE_DEVICES=5,7 torchrun \
-  --standalone \
-  --nnodes=1 \
-  --nproc_per_node="$GPUS" \
-  tools/dist_train.py \
-  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
-  --launcher pytorch \
-  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_cache_only_frame_shuffle \
-  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
-  --data.train.dataset.sequences_split_num all \
-  --data.train.dataset.skip_empty_gt True \
-  --streaming.history_fusion.enabled False \
-  --data.train.dataset.keep_consistent_seq_aug False \
-  --streaming.bev_warp.enabled False \
-  --data.samples_per_gpu "$BATCH_SIZE" \
-  --data.workers_per_gpu "$NUM_WORKERS" \
-  --runner.max_iters "$MAX_ITERS" \
-  --evaluation.interval "$INTERVAL" \
-  --checkpoint_config.interval "$INTERVAL" \
-  --log_config.interval 50 \
-  --optimizer.lr 2.0e-4 \
-  --checkpoint_config.max_keep_ckpts 1 
 
+#*----------------------------------------------------------------------#
 # 子序列流式训练；启用以子序列为单位的CBGS重采样；跳过无GT框的帧；子序列内数据增强一致性；历史信息仅缓存；混合精度训练
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
@@ -1425,6 +1394,43 @@ CUDA_VISIBLE_DEVICES=6,7 torchrun \
   --data.train.dataset.sequence_cbgs True \
   --data.train.dataset.skip_empty_gt True \
   --data.train.dataset.keep_consistent_seq_aug True \
+  --streaming.history_fusion.enabled False \
+  --streaming.bev_warp.enabled False \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1 \
+
+# --data.train.dataset.skip_prob 0.1 \ # 启用 随机额外跳过一帧，改变时间间隔；默认设置为0关闭
+# --data.train.dataset.sequence_flip_prob 0.1 \ # 随机反转整段时间顺序；默认关闭
+# 实验：cache：仅缓存历史。cbgs：子序列 CBGS。faug：逐帧独立增强。skip10：10% 随机跳帧。rev10：10% 子序列时间反序。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+CUDA_VISIBLE_DEVICES=2,3 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_cache_cbgs_faug_skip10_rev10 \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.train.dataset.sequence_cbgs True \
+  --data.train.dataset.skip_empty_gt True \
+  --data.train.dataset.keep_consistent_seq_aug False \
+  --data.train.dataset.skip_prob 0.1 \
+  --data.train.dataset.sequence_flip_prob 0.1 \
   --streaming.history_fusion.enabled False \
   --streaming.bev_warp.enabled False \
   --data.samples_per_gpu "$BATCH_SIZE" \
@@ -1505,3 +1511,19 @@ cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 python tools/compare_training_sampling.py \
   --seed 0 \
   --out-dir /home/wangyushen/Data/Outputs/daocc/analysis/sampling_comparison
+
+#===========================================================#
+# 可视化：同一子序列对照五种方式：一致增强基线、逐帧独立增强、随机跳帧、时间反序、组合增强。保存：
+# - 六路增强后图像、LiDAR 点云及 GT 框。
+# - 子序列切分和帧读取顺序图。
+# - CBGS 统计图、槽位调度图。
+# - 增强参数及跳帧记录 JSON。
+
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+python tools/visualize_sequence_strategies.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/outputs/sequence_strategies \
+  --num-groups 2 \
+  --max-frames 6 \
+  --seed 0

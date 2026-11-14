@@ -21,6 +21,9 @@ data:
       sequences_split_num: 2
       #* (11.13) 整段有放回 CBGS；段内有序，不自动扩大训练步数。
       sequence_cbgs: false
+      #* (11.13) StreamOcc 风格随机跳帧、整段时间反序，默认关闭。
+      skip_prob: 0.0
+      sequence_flip_prob: 0.0
       #* (11.12) StreamOcc 同名开关：true 子序列内几何增强一致，false 每帧独立增强。
       keep_consistent_seq_aug: true
       #* (11.12) 空检测 GT 顺序跳过；验证集不跳帧。

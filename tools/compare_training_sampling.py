@@ -75,6 +75,9 @@ def main():
     stream_cfg = load_config(args.stream_config)
     stream_cfg.seed = args.seed
     stream_cfg = prepare_streaming_config(stream_cfg)
+    #* (11.13) 随机跳帧后每轮输出数量不固定，不能再按完整列表给出精确 epoch 步数。
+    if stream_cfg.data.train.get('skip_prob', 0) > 0:
+        raise ValueError('Exact sampled-list epoch budgets require skip_prob=0; random skipping changes emitted frame counts.')
     # Explicit scenario requested by this audit; original YAML is never changed.
     stream_cfg.data.train.sequence_cbgs = True
     stream_dataset = build_dataset(deepcopy(stream_cfg.data.train))

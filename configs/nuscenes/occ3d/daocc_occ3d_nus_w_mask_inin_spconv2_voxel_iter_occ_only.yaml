@@ -1,0 +1,326 @@
+#* (11.14) 基于同目录 spconv2_voxel_iter.yaml 的纯占据监督对照配置。
+# Torchpack 只自动合并上级 default.yaml，因此在此保留基线模型和训练配置。
+# 关闭 CenterHead，并覆盖完整 train_pipeline，移除检测目标生成及 object_targets 收集。
+# 保留 CBGS、检测 GT 加载/过滤及收集，维持原基线样本选择；
+# filter_empty_gt 在 pipeline 返回后仍需读取 gt_labels_3d，但这些 GT 不参与模型损失。
+# 验证模型仅输出 occ_pred，数据集 evaluate 自动只执行占据评估。
+#* 基于 daocc_occ3d_nus_w_mask.yaml 复制模型配置，仅覆盖本机数据路径。
+#* Torchpack 自动合并上级 default.yaml，不会自动继承同目录的原模型文件。
+#* 原始数据根目录用于 nuScenes 数据表读取及检测评估，不能设为 info 输出目录。
+dataset_root: /home/wangyushen/Data/Datasets/Nuscenes/
+
+evaluation:
+  interval: 1
+  jsonfile_prefix: /home/wangyushen/Data/Outputs/tmp
+
+#* 新生成的 pkl 已包含各样本的 occ3d.occ_path，无需在训练配置中重复指定 gts。
+#* train 外层沿用 CBGSDataset，因此训练标注路径位于 data.train.dataset 下。
+data:
+  #* 每张 GPU 的 batch size；单卡先设为 1。
+  samples_per_gpu: 1
+  #* 每张 GPU 的数据加载进程数；设为 0 方便排查数据加载错误。
+  workers_per_gpu: 2
+
+  train:
+    dataset:
+      ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_train.pkl
+  val:
+    ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_val.pkl
+  test:
+    #* mini 的离线测试使用验证集及其真值。
+    ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_val.pkl
+
+#* 以下模型和训练参数保持原配置；每卡 batch size 仍继承默认值 4。
+#* 显存不足时可通过命令行 --data.samples_per_gpu 1 覆盖。
+voxel_size: [0.075, 0.075, 0.2]
+point_cloud_range: [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+
+augment3d:
+  scale: [1., 1.]
+  rotate: [-0., 0.]
+  translate: 0.
+
+model:
+  type: BEVFusion
+  encoders:
+    lidar:
+      voxelize:
+        type: Spconv2Voxelization # 使用 spconv2 PointToVoxel；未配置 type 的原配置仍使用旧 Voxelization。
+        max_num_points: 10
+        point_cloud_range: ${point_cloud_range}
+        voxel_size: ${voxel_size}
+        max_voxels: [ 120000, 160000 ]
+      backbone:
+        type: SparseEncoderSpconv2 # 使用独立的官方 spconv 2.x 实现；原 SparseEncoder 和原配置不变。
+        in_channels: 5
+        sparse_shape: [ 1440, 1440, 41 ]
+        output_channels: 128
+        order:
+          - conv
+          - norm
+          - act
+        encoder_channels:
+          - [ 16, 16, 32 ]
+          - [ 32, 32, 64 ]
+          - [ 64, 64, 128 ]
+          - [ 128, 128 ]
+        encoder_paddings:
+          - [ 0, 0, 1 ]
+          - [ 0, 0, 1 ]
+          - [ 0, 0, [ 1, 1, 0 ] ]
+          - [ 0, 0 ]
+        block_type: basicblock
+    camera:
+      backbone:
+        type: ResNet
+        depth: 50
+        out_indices: [1, 2, 3]
+        # with_cp: true
+        init_cfg:
+          type: Pretrained
+          checkpoint: /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth
+      neck:
+        type: GeneralizedLSSFPN
+        in_channels: [512, 1024, 2048]
+        out_channels: 256
+        start_level: 0
+        num_outs: 3
+        norm_cfg:
+          type: BN2d
+          requires_grad: true
+        act_cfg:
+          type: ReLU
+          inplace: true
+        upsample_cfg:
+          mode: bilinear
+          align_corners: false
+      vtransform:
+        type: BEVTransformV2
+        top_type: lidar
+        x: [-54.0, 54.0]
+        y: [-54.0, 54.0]
+        z: [-5.0, 3.0]
+        xs: 180
+        ys: 180
+        zs: 10
+        input_size: [256, 704]
+        in_channels: 256
+        out_channels: 128
+  fuser:
+    type: ConvFuser
+    in_channels: [1280, 256]
+    out_channels: 512
+  decoder:
+    backbone:
+      type: CustomResNet
+      stride: [1, 1, 2]
+      numC_input : 512
+      num_channels: [128, 256, 512]
+    neck:
+      type: FPN_LSS
+      in_channels: 640
+      out_channels: 512
+      scale_factor: 2
+      extra_upsample: null
+  heads:
+    map: null
+    object: null # 不构建 CenterHead，不计算检测损失，也不解码检测框。
+    occ:
+      type: BEVOCCHead2D
+      in_dim: 128
+      out_dim: 128
+      Dz: 16
+      use_mask: true
+      num_classes: 18
+      use_predicter: true
+      class_balance: false
+      loss_occ:
+        type: CrossEntropyLoss
+        use_sigmoid: false
+        ignore_index: 255
+        loss_weight: 1.0
+      coordinate_transform:
+        type: CrossCoordinateSample
+        point_range: [-40., 40., -40., 40., 0., 0.]
+        point_num: [200, 200, 1]
+        lidar_point_range: [-54.0, 54.0, -54.0, 54.0]
+        in_dim: 512
+        out_dim: 128
+  loss_scale:
+    object: 0.0 # 覆盖上级配置可能继承的检测权重；检测头本身已关闭。
+    occ: 1.0
+
+# AdamW: 基础学习率2e-4，前500个iteration使用线性warmup
+# warmup开始时，2e-4/3=6.67e-5，500步内逐步增加到6.67e-5
+optimizer:
+  type: AdamW
+  # lr: 2.0e-4
+  lr: 1.0e-4
+  weight_decay: 0.01
+
+optimizer_config:
+  grad_clip:
+    max_norm: 35
+    norm_type: 2
+
+# warmup 结束后，按照余弦退火逐渐降低学习率。
+# min_lr_ratio: 1e-3 表示余弦退火的理论目标最小学习率为：2e-4 × 1e-3 = 2e-7
+# MMCV默认按epoch调整学习率：训练最初500步：学习率线性增加；预热结束后：每个epoch开始时，根据余弦公式更新一次，统一epoch内保持不变
+lr_config:
+  policy: CosineAnnealing
+  warmup: linear
+  warmup_iters: 500
+  warmup_ratio: 0.33333333
+  min_lr_ratio: 1.0e-3
+  by_epoch: false       # 每个iteration更新余弦学习率；默认为true
+
+max_epochs: 6
+
+#*-------------------------------------------#
+#* runner 和 checkpoint_config: 仅涉及训练控制与保存
+runner:
+  type: ResumableEpochBasedRunner # 选择新增的ResumableEpochBasedRunner，支持记录并恢复轮内训练进度
+  max_epochs: ${max_epochs}
+  max_iters: null # 表示仍然按max_epoches完成训练
+
+# checkpoint_config：选择新增的 ResumableCheckpointHook，每 2000 步保存一次，最后一步也保存。
+# 每2000个全局iteration保存一次；训练最后一步也保存。
+checkpoint_config:
+  type: ResumableCheckpointHook
+  by_epoch: false
+  interval: 3000
+  save_last: true
+  save_optimizer: true
+  max_keep_ckpts: ${max_keep_ckpt}
+
+# 更新原有evaluation段，保留其中其他参数，例如jsonfile_prefix。
+evaluation:
+  by_epoch: false     # 按全局iteration计数，而不是按epoch
+  interval: 3000      # 每完成2000步，执行一次完整验证集评估
+  evaluate_last: true # 训练最后一步也评估，即使不是2000的整数倍
+
+# EMA先更新，再随模型、优化器一起写入iter_N.pth。
+custom_hooks:
+  type: ResumableEMAHook
+  init_updates: 10560     # \[d=0.999\times\left(1-e^{-\text{updates}/2000}\right)\]
+  priority: ABOVE_NORMAL  # 控制 Hook 执行顺序：让 EMA 在普通 checkpoint 保存之前完成更新，确保同一文件里的模型与 EMA 对应同一步。
+  resume: null            # 不单独指定 EMA 权重文件。不代表禁止恢复 EMA；恢复训练时，从完整的 iter_N.pth 内部读取 EMA。
+  max_keep_ckpt: ${max_keep_ckpt}
+
+#* (11.14) 重写训练流水线的原因与改动：
+# 本文件会合并上级 configs/nuscenes/default.yaml；只设 object: null 不会自动删除检测数据步骤。
+# 上级 GenerateCenterHeadTargets 引用了 model.heads.object 的 tasks/train_cfg/norm_bbox，
+# 检测头关闭后这些字段不存在，继续继承会导致配置插值失败。
+# 因此在此给出完整 train_pipeline 列表，整体替换默认列表（不会追加或逐项合并）。
+# 相比默认流水线仅移除：
+# 1. GenerateCenterHeadTargets：不再生成检测热图、框回归目标、中心索引和有效掩码。
+# 2. Collect3D.keys 中的 object_targets：对应字段已不再生成，不能继续收集。
+# 保留图像/点云加载、增强、占据 GT 加载、归一化和格式化等其他步骤。
+# 检测框加载、范围/类别过滤及 gt_labels_3d 收集仍保留，以维持原基线的空 GT 帧筛选；
+# CBGS 也仍按检测类别重采样。这是移除检测监督的对照，不是完全不依赖检测标注的数据方案。
+# data.train.dataset.pipeline 继承的 ${train_pipeline} 将解析为这里的新列表。
+# test_pipeline 不必重写：默认测试流水线没有检测目标生成或检测头配置引用，
+# 即使收集检测 GT，模型也只输出 occ_pred，评估仅执行占据分支。
+train_pipeline:
+  -
+    type: LoadMultiViewImageFromFiles
+    to_float32: true
+  -
+    type: LoadPointsFromFile
+    coord_type: LIDAR
+    load_dim: ${load_dim}
+    use_dim: ${use_dim}
+    reduce_beams: ${reduce_beams}
+    load_augmented: ${load_augmented}
+  -
+    type: LoadPointsFromMultiSweeps
+    #* 当前样本是关键帧；历史输入来自其 LIDAR_TOP 的 prev 链，通常包含非关键帧。
+    #* 训练时若候选历史帧多于9帧，将无放回随机选择9帧，并非固定取最近9帧。
+    sweeps_num: 9
+    load_dim: ${load_dim}
+    use_dim: ${use_dim}
+    reduce_beams: ${reduce_beams}
+    # 场景开头完全没有历史扫描时，重复当前关键帧点云进行填充。
+    pad_empty_sweeps: true
+    remove_close: true
+    load_augmented: ${load_augmented}
+  -
+    #* (11.14) 保留检测 GT 供后续 ObjectRangeFilter/ObjectNameFilter 和空 GT 帧过滤使用。
+    # 读取标注不等于添加检测监督；object: null 时模型不计算检测损失。
+    type: LoadAnnotations3D
+    with_bbox_3d: true
+    with_label_3d: true
+    with_attr_label: False
+  -
+    type: ImageAug3D
+    final_dim: ${image_size}
+    resize_lim: ${augment2d.resize[2]}
+    bot_pct_lim: [0.0, 0.0]
+    rot_lim: ${augment2d.rotate}
+    rand_flip: true
+    is_train: true
+  -
+    type: GlobalRotScaleTrans
+    resize_lim: ${augment3d.scale}
+    rot_lim: ${augment3d.rotate}
+    trans_lim: ${augment3d.translate}
+    is_train: true
+  -
+    #* (11.14) 占据任务仍需此步骤：加载 voxel_semantics、mask_lidar、mask_camera。
+    # 它独立于 CenterHead，不能随检测目标生成步骤一起删除。
+    type: LoadOccGTFromFile
+    data_type: ${occ_data_type}
+  -
+    type: RandomFlip3D
+  -
+    type: PointsRangeFilter
+    point_cloud_range: ${point_cloud_range}
+  -
+    type: ObjectRangeFilter
+    point_cloud_range: ${point_cloud_range}
+  -
+    type: ObjectNameFilter
+    classes: ${object_classes}
+  -
+    type: ImageNormalize
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+  -
+    type: GridMask
+    use_h: true
+    use_w: true
+    max_epoch: ${max_epochs}
+    rotate: 1
+    offset: false
+    ratio: 0.5
+    mode: 1
+    prob: ${augment2d.gridmask.prob}
+    fixed_prob: ${augment2d.gridmask.fixed_prob}
+  -
+    type: PointShuffle
+  -
+    type: DefaultFormatBundle3D
+    classes: ${object_classes}
+  -
+    type: Collect3D
+    keys:
+      - img
+      - points
+      - gt_bboxes_3d
+      #* (11.14) 数据集在 pipeline 返回后通过此字段执行 filter_empty_gt，因此仍需收集。
+      - gt_labels_3d
+      # 此处不再收集 object_targets；下面保留的是占据监督与可见性掩码。
+      - voxel_semantics
+      - mask_lidar
+      - mask_camera
+    meta_keys:
+      - camera_intrinsics
+      - camera2ego
+      - camera_ego2global
+      - lidar2ego
+      - lidar2camera
+      - camera2lidar
+      - lidar2image
+      - img_aug_matrix
+      - lidar_aug_matrix
+      - occ_aug_matrix

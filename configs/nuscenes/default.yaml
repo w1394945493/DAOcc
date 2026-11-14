@@ -103,6 +103,11 @@ train_pipeline:
   # (10.29 检测GT迁移) 必须放在所有三维增强、翻转和 GT 范围/类别过滤之后，
   # (10.29 检测GT迁移) 保证预生成的 CenterHead 目标与最终送入模型的 GT 完全一致。
   -
+    #* (11.14) 此步骤直接依赖 model.heads.object 检测头配置，不会调用模型前向。
+    # tasks 决定类别分组；train_cfg 决定网格、中心热图及回归目标编码；
+    # norm_bbox 决定框尺寸是否取对数，必须与 CenterHead 的预测/损失定义一致。
+    # 将增强、过滤后的 GT 框编码成 object_targets：热图、框回归量、索引和有效掩码。
+    # 若关闭检测头（object: null），下级配置必须移除此步骤，否则配置插值会访问空对象。
     type: GenerateCenterHeadTargets
     tasks: ${model.heads.object.tasks}
     train_cfg: ${model.heads.object.train_cfg}
@@ -136,6 +141,8 @@ train_pipeline:
       - gt_labels_3d
       # (10.29 检测GT迁移) DataLoader worker 已生成的检测 heatmap、框回归目标、
       # (10.29 检测GT迁移) 中心索引和有效 mask；Collect3D 将其送入模型 kwargs。
+      #* (11.14) 此项依赖上面的 GenerateCenterHeadTargets 输出，由 CenterHead.loss 消费。
+      # 只关闭目标生成还不够：纯占据流水线也应移除此收集项，避免读取不存在的字段。
       - object_targets
       - voxel_semantics
       - mask_lidar
@@ -152,6 +159,10 @@ train_pipeline:
       - lidar_aug_matrix
       - occ_aug_matrix
 
+#* (11.14) 验证/测试流水线不生成 CenterHead 监督目标，也不引用 model.heads.object。
+# LoadAnnotations3D 读取数据标注，不依赖检测模型；Collect3D 只负责收集字段。
+# 因此 object: null 时仍可复用本流水线；保留的检测 GT 不会触发检测预测或损失。
+# NuScenesDatasetOccupancy.evaluate 根据输出是否含 boxes_3d / occ_pred 选择评估任务。
 test_pipeline:
   -
     type: LoadMultiViewImageFromFiles

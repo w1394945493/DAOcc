@@ -13,6 +13,9 @@ from mmdet.core import build_bbox_coder, multi_apply
 
 
 def clip_sigmoid(x: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+    #* (11.14) 将 logits 逐元素转为 sigmoid 概率，并裁剪至 [eps, 1-eps]。
+    # sigmoid_ 会原地修改输入；裁剪用于降低热图损失中极端概率带来的数值风险。
+    # 各类别独立计算，不做 softmax，也不要求类别通道的概率之和为 1。
     return torch.clamp(x.sigmoid_(), min=eps, max=1 - eps)
 
 
@@ -119,6 +122,8 @@ class SeparateHead(BaseModule):
                     [B, N, H, W].
         """
         ret_dict = dict()
+        #* (11.14) 各分支最后一层直接输出卷积结果；heatmap 此时为可正可负的 logits。
+        # 此处没有 sigmoid/softmax；heatmap 的概率转换在训练 loss 或推理解码中完成。
         for head in self.heads:
             ret_dict[head] = self.__getattr__(head)(x)
 
@@ -329,9 +334,17 @@ class CenterHead(BaseModule):
         )
 
         self.task_heads = nn.ModuleList()
-
-        for num_cls in num_classes:
+        #*==============================================================#
+        #* (11.14) 根据 tasks 创建任务头；一个任务头可以负责多个类别。
+        # 当前六组类别数为 [1, 2, 2, 1, 2, 2]，共创建六个 SeparateHead，覆盖十类。
+        # common_heads 定义 reg/height/dim/rot/vel 等回归分支：组内类别共用回归，
+        # 不同任务头分别构建网络，参数独立；deepcopy 仅复制分支配置，不共享权重。
+        for num_cls in num_classes: 
             heads = copy.deepcopy(common_heads)
+            # heatmap 的配置为 (输出通道数, 卷积层数)，由 SeparateHead 构建卷积。
+            # 例如 [truck, construction_vehicle] 对应两个热图通道，顺序与组内类别一致；
+            # 当前配置下输出为 [B, 2, 180, 180]，每个通道预测该类别的中心点分数。
+            # 解码时由热图通道确定组内标签，get_bboxes 合并各组时加偏移得到全局标签。
             heads.update(dict(heatmap=(num_cls, num_heatmap_convs)))
             separate_head.update(
                 in_channels=share_conv_channel, heads=heads, num_cls=num_cls
@@ -623,7 +636,8 @@ class CenterHead(BaseModule):
         masks = object_targets["masks"]
         loss_dict = dict()
         for task_id, preds_dict in enumerate(preds_dicts):
-            # heatmap focal loss
+            #* (11.14) 训练时将热图 logits 转为裁剪后的 sigmoid 概率，再计算 GaussianFocalLoss。
+            # 此赋值会将预测字典中的 heatmap 替换为概率；执行后查看该字段已不再是 logits。
             preds_dict[0]["heatmap"] = clip_sigmoid(preds_dict[0]["heatmap"])
             num_pos = heatmaps[task_id].eq(1).float().sum().item() # (1) 当前任务在整个 batch 中的正样本数。即使为 0，归一化分母也取 1。
             loss_heatmap = self.loss_cls(
@@ -707,6 +721,11 @@ class CenterHead(BaseModule):
         for task_id, preds_dict in enumerate(preds_dicts):
             num_class_with_bg = self.num_classes[task_id]
             batch_size = preds_dict[0]["heatmap"].shape[0]
+            
+            #* (11.14) 推理解码接收原始 logits，逐类别做 sigmoid，作为 Top-K 和阈值筛选的分数。
+            # 不做 softmax；例如 truck 与 construction_vehicle 两通道的概率不必相加为 1。
+            # 此处非原地转换，预测字典中的 heatmap 保持 logits；不要传入已计算 loss 的热图。
+            # 遍历六个任务头，对每个当前 任务头的整张热图做sigmoid()
             batch_heatmap = preds_dict[0]["heatmap"].sigmoid()
 
             batch_reg = preds_dict[0]["reg"]
@@ -737,7 +756,8 @@ class CenterHead(BaseModule):
             batch_reg_preds = [box["bboxes"] for box in temp]
             batch_cls_preds = [box["scores"] for box in temp]
             batch_cls_labels = [box["labels"] for box in temp]
-            if nms_types[task_id] == "circle":
+
+            if nms_types[task_id] == "circle": 
                 ret_task = []
                 for i in range(batch_size):
                     boxes3d = temp[i]["bboxes"]
@@ -773,24 +793,31 @@ class CenterHead(BaseModule):
                     )
                 )
 
-        # Merge branches results
+        #* (11.14) 按样本合并六个任务头经过解码、过滤和 NMS 后的检测结果。
+        # rets[任务编号][样本编号] 保存 bboxes、scores、labels；各任务保留框数可以不同。
         num_samples = len(rets[0])
 
         ret_list = []
         for i in range(num_samples):
             for k in rets[0][i].keys():
                 if k == "bboxes":
+                    # 沿框数量维拼接该样本的六组框，再将几何中心 Z 转为框底面中心 Z。
                     bboxes = torch.cat([ret[i][k] for ret in rets])
                     bboxes[:, 2] = bboxes[:, 2] - bboxes[:, 5] * 0.5
                     bboxes = metas[i]["box_type_3d"](bboxes, self.bbox_coder.code_size)
                 elif k == "scores":
+                    # 按相同任务顺序拼接置信度，确保与框逐一对应。
                     scores = torch.cat([ret[i][k] for ret in rets])
                 elif k == "labels":
+                    # 各头原先使用从 0 开始的组内标签；累加前面各组的类别数得到全局标签。
+                    # 类别数 [1, 2, 2, 1, 2, 2] 对应偏移 [0, 1, 3, 5, 6, 8]。
+                    # 例如头 1 的 truck/construction_vehicle：局部 0/1 加 1 后为全局 1/2。
                     flag = 0
                     for j, num_class in enumerate(self.num_classes):
                         rets[j][i][k] += flag
                         flag += num_class
                     labels = torch.cat([ret[i][k].int() for ret in rets])
+            # 每个样本返回一组框、分数和全局标签；此处只合并，不再做跨任务 NMS。
             ret_list.append([bboxes, scores, labels])
         return ret_list
 

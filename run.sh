@@ -1232,6 +1232,31 @@ python -m torch.distributed.run \
   --evaluation.interval 3862 \
   --max_keep_ckpt 1
 
+#* 仅占据预测：
+# 分析：在相同采样策略和训练预算下，加入权重为 0.01 的 3D 检测辅助监督，是否改善占据预测？
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=5,7 \
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+PYTHONWARNINGS=ignore \
+python -m torch.distributed.run \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=2 \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_iter_occ_only.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_iter_fp16_htc_occ_only \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.samples_per_gpu 4 \
+  --data.workers_per_gpu 4 \
+  --max_epochs 6 \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.interval 3862 \
+  --evaluation.interval 3862 \
+  --max_keep_ckpt 1
+
 #*==============================================================================================================#
 #* (11.12) 流式训练
 # 可视化验证流式训练数据集处理是否正确
@@ -1442,7 +1467,40 @@ CUDA_VISIBLE_DEVICES=2,3 torchrun \
   --optimizer.lr 2.0e-4 \
   --checkpoint_config.max_keep_ckpts 1 \
 
-
+# 实验：cache：仅缓存历史。cbgs：子序列 CBGS。faug：逐帧独立数据增强（关闭子序列内增强一致性）。无随机跳帧和序列反序
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+CUDA_VISIBLE_DEVICES=6,7 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_cache_cbgs_faug \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.train.dataset.sequence_cbgs True \
+  --data.train.dataset.skip_empty_gt True \
+  --data.train.dataset.keep_consistent_seq_aug False \
+  --data.train.dataset.skip_prob 0.0 \
+  --data.train.dataset.sequence_flip_prob 0.0 \
+  --streaming.history_fusion.enabled False \
+  --streaming.bev_warp.enabled False \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1 \
 
 #* 评估
 # --save-predictions # 保存逐帧预测结果
@@ -1527,3 +1585,37 @@ python tools/visualize_sequence_strategies.py \
   --num-groups 2 \
   --max-frames 6 \
   --seed 0
+
+#*-----------------------------------------------------------------------#
+# 实验：目标级错误分析，用于分析3D检测与占据预测两种输出是否存在互补信息
+# test.py 的配置覆盖需要放在 --cfg-options
+# 推理，保存各帧预测结果：
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0 \
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+PYTHONWARNINGS=ignore \
+python tools/test.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_iter.yaml \
+  /home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_iter_fp16_htc/latest.pth \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/test/spconv2_voxel_iter_fp16_htc/preds \
+  --save-predictions \
+  --cfg-options \
+  data.test.samples_per_gpu=4 \
+  data.workers_per_gpu=4 \
+
+# 分析：
+# 输出包括：
+# - objects.csv：每个 GT 目标的检测匹配、占据召回、漏空、错类及局部 IoU。
+# - 分类别、距离、错误类型的汇总 CSV。
+# - coverage.json：分析覆盖情况，缺失预测不算漏检。
+# - cases/：三类典型错误的框、OCC GT、预测及错误分布图。
+# 默认同类别中心距离 2 米内匹配；目标有效体素至少 5 个，召回率低于 0.5 为差、不低于 0.8 为好，均可通过参数调整。输出目录须为空。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+python tools/analyze_detection_occ_errors.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_iter.yaml \
+  --pred-dir /home/wangyushen/Data/Outputs/daocc/test/spconv2_voxel_iter_fp16_htc/preds \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/test/spconv2_voxel_iter_fp16_htc/object_analysis \
+  --allow-partial \
+  --max-cases-per-group 20

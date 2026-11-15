@@ -11,8 +11,14 @@ from .bevfusion import BEVFusion
 
 @FUSIONMODELS.register_module()
 class StreamingBEVFusion(BEVFusion):
-    def __init__(self, cache_enabled=True, bev_warp=None, history_fusion=None, **kwargs):
+    def __init__(self, cache_enabled=True, bev_warp=None, history_fusion=None,
+                 fuse_before_decoder=False, **kwargs):
+        #* (11.15) 可选 decoder 前/后时序处理；默认保持原有 decoder 后路径。
+        # 缓存、对齐与融合均在同一位置执行，避免跨阶段混用历史特征。
+        if not isinstance(fuse_before_decoder, bool):
+            raise TypeError('fuse_before_decoder must be True or False')
         super().__init__(**kwargs)
+        self.fuse_before_decoder = fuse_before_decoder
         self.bev_cache = BEVFeatureCache(enabled=cache_enabled)
         self.bev_warp = BEVFeatureWarp(**bev_warp) if bev_warp is not None else None
         #* (11.12) 可选二维 RefineNet 与拼接融合；关闭时保留仅缓存路径。
@@ -59,7 +65,7 @@ class StreamingBEVFusion(BEVFusion):
         try:
             result = super().forward_single(*args, **kwargs)
             if self._pending_bev is None:
-                raise RuntimeError('Decoder did not produce a BEV feature')
+                raise RuntimeError('Streaming stage did not produce a BEV feature')
             self.bev_cache.update(self._pending_bev, stream_metas)
             return result
         finally:
@@ -71,11 +77,11 @@ class StreamingBEVFusion(BEVFusion):
         streaming = self.training or self._stream_eval_enabled
         history_bev, history_valid = self.bev_cache.get(self._stream_metas) if streaming else (None, None)
         if streaming:
-            if history_bev is not None and (history_bev.shape != current_bev.shape
-                                           or history_bev.device != current_bev.device
-                                           or history_bev.dtype != current_bev.dtype):
-                self.bev_cache.reset()
-                history_bev, history_valid = None, None
+            #* (11.15) 固定融合位置下，历史和当前 BEV 的 shape/device 应保持一致。
+            # 不兼容说明缓存或前向流程异常，必须报错，不能静默退化为逐帧训练。
+            # AMP 允许历史 FP32、当前 FP16；dtype 不同本身不构成异常。
+            if history_bev is not None and (history_bev.shape != current_bev.shape or history_bev.device != current_bev.device):
+                raise RuntimeError('历史与当前 BEV 的 shape 或 device 不一致')
             # Detached view is only held for this forward; cache.update makes the owned copy.
             self._pending_bev = current_bev.detach()
             #* (11.12) 在原始缓存快照上执行历史→当前 BEV 对齐，不覆盖缓存中的原始 BEV。
@@ -103,4 +109,5 @@ class StreamingBEVFusion(BEVFusion):
         else:
             replacement = current_bev.detach() if self.training else current_bev
             history_bev = torch.where(history_valid[:, None, None, None], history_bev, replacement)
+        
         return self.history_fusion(current_bev, history_bev)

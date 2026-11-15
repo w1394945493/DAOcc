@@ -18,6 +18,8 @@ def prepare_streaming_model_config(cfg):
         raise ValueError('Streaming adapter requires the DAOcc BEVFusion model')
     cfg.model.type = 'StreamingBEVFusion'
     cfg.model.cache_enabled = cfg.streaming.get('cache_enabled', True)
+    #* (11.15) 训练、流式评估共用位置配置；旧配置默认 decoder 后处理。
+    cfg.model.fuse_before_decoder = cfg.streaming.get('fuse_before_decoder', False)
     #* (11.12) 流式 BEV 对齐使用源 LiDAR BEV 范围，与占据输出的范围分开配置。
     warp_cfg = dict(cfg.streaming.get('bev_warp', {}))
     if warp_cfg.pop('enabled', False):

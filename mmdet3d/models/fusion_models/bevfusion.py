@@ -331,6 +331,12 @@ class BEVFusion(Base3DFusionModel):
 
         batch_size = x.shape[0]
 
+        #* (11.15) 每次前向仅在选定位置调用一次时序接口。
+        # 普通模型没有该属性，默认保持 decoder 后的原有恒等接口路径。
+        fuse_before_decoder = getattr(self, 'fuse_before_decoder', False)
+        if fuse_before_decoder:
+            x = self.process_bev_features(x) # (1 512 180 180)
+
         #* =================== 3. Decoder：处理共享融合特征 ===================
         # backbone为CustomResNet，生成三层BEV；neck为FPN_LSS，融合第0与第2层。
         # 这里是二维残差卷积与上采样，不是Transformer Decoder。
@@ -339,9 +345,10 @@ class BEVFusion(Base3DFusionModel):
             x = self.decoder["neck"](x)     # (1 512 180 180)
             # 当前输出[B,512,180,180]，随后同时服务于检测与占据预测。
 
-        #* (11.12) 在 Decoder 输出、各预测头之前调用 BEV 扩展接口。
-        # 原模型执行恒等操作；流式子类在此接入历史接口，当前阶段仍返回当前 BEV。
-        x = self.process_bev_features(x)
+        #* (11.15) 默认在 decoder 输出、任务头之前处理历史，保持既有行为。
+        # 选择 fuse_before_decoder=True 时已在上方处理，此处不重复融合或更新缓存。
+        if not fuse_before_decoder:
+            x = self.process_bev_features(x) # (1 512 180 180)
 
         #* =================== 4. 训练分支：各预测头计算监督损失 ===================
         # model.train()走这里；完整前向检查使用model.eval()，进入下面推理分支。

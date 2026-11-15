@@ -1502,6 +1502,79 @@ CUDA_VISIBLE_DEVICES=6,7 torchrun \
   --optimizer.lr 2.0e-4 \
   --checkpoint_config.max_keep_ckpts 1 \
 
+#* 实验：cache,历史帧信息细化+decoder后融合。cbgs：子序列 CBGS。faug：逐帧独立数据增强（关闭子序列内增强一致性）。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+CUDA_VISIBLE_DEVICES=2,3 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_post_cbgs_faug_skip10_rev10 \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.train.dataset.sequence_cbgs True \
+  --data.train.dataset.skip_empty_gt True \
+  --data.train.dataset.keep_consistent_seq_aug False \
+  --data.train.dataset.skip_prob 0.1 \
+  --data.train.dataset.sequence_flip_prob 0.1 \
+  --streaming.history_fusion.enabled True \
+  --streaming.bev_warp.enabled True \
+  --streaming.fuse_before_decoder False \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1
+
+#* 实验：cache,历史帧信息细化+decoder前融合。cbgs：子序列 CBGS。faug：逐帧独立数据增强（关闭子序列内增强一致性）。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+CUDA_VISIBLE_DEVICES=6,7 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_pre_cbgs_faug_skip10_rev10 \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.train.dataset.sequence_cbgs True \
+  --data.train.dataset.skip_empty_gt True \
+  --data.train.dataset.keep_consistent_seq_aug False \
+  --data.train.dataset.skip_prob 0.1 \
+  --data.train.dataset.sequence_flip_prob 0.1 \
+  --streaming.history_fusion.enabled True \
+  --streaming.bev_warp.enabled True \
+  --streaming.fuse_before_decoder True \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1
+
+
 #* 评估
 # --save-predictions # 保存逐帧预测结果
 conda activate daocc-cu121

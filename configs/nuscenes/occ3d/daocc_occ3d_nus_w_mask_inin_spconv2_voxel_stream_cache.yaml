@@ -218,6 +218,10 @@ max_epochs: 6
 streaming:
   enabled: true
   cache_enabled: true
+  #* (11.15) True：多模态融合后、decoder 前；False：decoder 后（默认）。
+  # 历史缓存跟随该位置；关闭历史融合时，也在选定位置缓存。
+  # 本配置两处均为 512 通道；其他架构需同步核对 history_fusion.channels 和 BEV 空间范围。
+  fuse_before_decoder: false
   #* (11.12) 开启时使用二维 RefineNet + 拼接融合，并缓存融合结果；暂无辅助监督。
   # 默认开启融合；仅缓存对比实验可用 --streaming.history_fusion.enabled False。
   history_fusion:

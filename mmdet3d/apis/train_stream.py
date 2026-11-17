@@ -14,9 +14,15 @@ from mmdet3d.utils import get_root_logger
 def prepare_streaming_model_config(cfg):
     """Configure the streaming model without requiring training data or a runner."""
     from mmdet3d.models.fusion_models.streaming_bevfusion import StreamingBEVFusion
-    if cfg.model.type not in ('BEVFusion', 'StreamingBEVFusion'):
-        raise ValueError('Streaming adapter requires the DAOcc BEVFusion model')
-    cfg.model.type = 'StreamingBEVFusion'
+    #* (11.17) 按原模型选择流式适配器，保留实例头和实例注入前向路径。
+    # 原 BEVFusion 的映射保持不变；组合模型仍继承 StreamingBEVFusion，复用训练/评估接口。
+    if cfg.model.type in ('InstanceBEVFusion', 'StreamingInstanceBEVFusion'):
+        from mmdet3d.models.fusion_models.streaming_instance_bevfusion import StreamingInstanceBEVFusion
+        cfg.model.type = 'StreamingInstanceBEVFusion'
+    elif cfg.model.type in ('BEVFusion', 'StreamingBEVFusion'):
+        cfg.model.type = 'StreamingBEVFusion'
+    else:
+        raise ValueError('Streaming adapter requires BEVFusion or InstanceBEVFusion')
     cfg.model.cache_enabled = cfg.streaming.get('cache_enabled', True)
     #* (11.15) 训练、流式评估共用位置配置；旧配置默认 decoder 后处理。
     cfg.model.fuse_before_decoder = cfg.streaming.get('fuse_before_decoder', False)

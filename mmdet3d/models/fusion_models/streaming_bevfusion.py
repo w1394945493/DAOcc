@@ -77,6 +77,7 @@ class StreamingBEVFusion(BEVFusion):
         streaming = self.training or self._stream_eval_enabled
         history_bev, history_valid = self.bev_cache.get(self._stream_metas) if streaming else (None, None)
         if streaming:
+            #!-----------------------------------------------------------------------#
             #* (11.15) 固定融合位置下，历史和当前 BEV 的 shape/device 应保持一致。
             # 不兼容说明缓存或前向流程异常，必须报错，不能静默退化为逐帧训练。
             # AMP 允许历史 FP32、当前 FP16；dtype 不同本身不构成异常。

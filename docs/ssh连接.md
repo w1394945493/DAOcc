@@ -4,6 +4,8 @@ State             Recv-Q            Send-Q                       Local Address:P
 LISTEN            0                 128                              127.0.0.1:17891                              0.0.0.0:*                uid:1059 ino:97866462 sk:300f cgroup:/user.slice/user-1059.slice/session-4986.scope <->
 <!-- 找到对应的 SSH 进程 -->
 loginctl session-status 4986 --no-pager
+
+loginctl session-status 7988 --no-pager
 <!-- 打印内容： -->
 4986 - wangyushen (1059)
   Since: Fri 2026-11-13 17:35:12 CST; 2h 20min ago
@@ -24,6 +26,7 @@ Service: sshd
 <!-- 之前残留、不再需要的 SSH 连接，直接执行： -->
 kill 1363151
 
+kill 2024358
 <!-- git -->
 git config --local http.proxy http://127.0.0.1:17891
 git push

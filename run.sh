@@ -1209,6 +1209,8 @@ bash scripts/train_occ3d.sh
 # --load_from None \
 # --resume_from /home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_iter/latest.pth \
 
+#*================================================================================#
+#* baseline：启用CBGS策略，混合精度训练
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 CUDA_VISIBLE_DEVICES=5,7 \
@@ -1502,7 +1504,8 @@ CUDA_VISIBLE_DEVICES=6,7 torchrun \
   --optimizer.lr 2.0e-4 \
   --checkpoint_config.max_keep_ckpts 1 \
 
-#* 实验：cache,历史帧信息细化+decoder后融合。cbgs：子序列 CBGS。faug：逐帧独立数据增强（关闭子序列内增强一致性）。
+#* 实验：cache, decoder后历史帧信息细化+融合。cbgs：子序列 CBGS。faug：逐帧独立数据增强（关闭子序列内增强一致性）。
+#* 54.58
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 NUM_FRAMES=28130
@@ -1538,7 +1541,8 @@ CUDA_VISIBLE_DEVICES=2,3 torchrun \
   --optimizer.lr 2.0e-4 \
   --checkpoint_config.max_keep_ckpts 1
 
-#* 实验：cache,历史帧信息细化+decoder前融合。cbgs：子序列 CBGS。faug：逐帧独立数据增强（关闭子序列内增强一致性）。
+#----------------------------------------------------------------------------------------------------
+#* 实验：cache, decoder前历史帧信息细化+融合。cbgs：子序列 CBGS。faug：逐帧独立数据增强（关闭子序列内增强一致性）。
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 NUM_FRAMES=28130
@@ -1574,6 +1578,46 @@ CUDA_VISIBLE_DEVICES=6,7 torchrun \
   --optimizer.lr 2.0e-4 \
   --checkpoint_config.max_keep_ckpts 1
 
+#*--------------------------------------------------------------#
+#* 继续验证目前各部分的有效性：
+#! 修改配置后，暂都报nan：
+# use_refine=False：关闭细化的 FP16 实验出现 NaN，原因尚未确定。
+# keep_consistent_seq_aug=True：子序列内复用几何增强参数。FP16 实验出现 NaN
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+CUDA_VISIBLE_DEVICES=6,7 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_pre_cbgs_consis_aug_skip10_rev10_fp16 \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.train.dataset.sequence_cbgs True \
+  --data.train.dataset.skip_empty_gt True \
+  --data.train.dataset.keep_consistent_seq_aug False \
+  --data.train.dataset.skip_prob 0.1 \
+  --data.train.dataset.sequence_flip_prob 0.1 \
+  --streaming.history_fusion.enabled True \
+  --streaming.bev_warp.enabled True \
+  --streaming.fuse_before_decoder True \
+  --streaming.history_fusion.use_refine True \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1
 
 #* 评估
 # --save-predictions # 保存逐帧预测结果
@@ -1660,7 +1704,7 @@ python tools/visualize_sequence_strategies.py \
   --seed 0
 
 #*-----------------------------------------------------------------------#
-# 实验：目标级错误分析，用于分析3D检测与占据预测两种输出是否存在互补信息
+# (11.14) 实验：目标级错误分析，用于分析3D检测与占据预测两种输出是否存在互补信息
 # test.py 的配置覆盖需要放在 --cfg-options
 # 推理，保存各帧预测结果：
 conda activate daocc-cu121
@@ -1692,3 +1736,117 @@ python tools/analyze_detection_occ_errors.py \
   --out-dir /home/wangyushen/Data/Outputs/daocc/test/spconv2_voxel_iter_fp16_htc/object_analysis \
   --allow-partial \
   --max-cases-per-group 20
+
+#*-----------------------------------------------------------------------#
+# (11.16) 实验：CenterPoint 实例特征—预测框—占据 BEV/GT 体素关联构建与可视化
+# --sample-stride 100 \ 指定采样间隔 默认间隔为 1，兼容原来的连续采样。
+# --camera-mask 相机掩码过滤
+# --individual-count 是旧版脚本中控制每帧额外生成多少张单实例图的参数。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+python tools/visualize_instance_bev_relations.py \
+  --gpu 0 \
+  --sample-index 0 \
+  --num-samples 5 \
+  --sample-stride 100 \
+  --score-threshold 0.3 \
+  --camera-mask \
+  --output-dir /home/wangyushen/Data/Outputs/daocc/outputs/visualizations/instance_bev_relations
+
+
+# 新增模块耗时开销分析:
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0 python tools/benchmark_instance_bevfusion.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_instance_bevfusion.yaml \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/analysis/instance_fusion_timing_3 \
+  --batch-size 1 \
+  --workers 4 \
+  --warmup 10 \
+  --steps 50 \
+  --precision fp16 \
+
+
+#*------------------------------------------------------------------------------------------#
+# (11.16) 3D检测引导的实例级占据特征融合实验
+# 在原 DAOcc 基线上，新增检测引导的实例级占据特征融合模块：
+# 筛选预测 3D 框，从检测 BEV 的候选来源位置提取实例特征，通过坐标对齐建立框与占据 BEV 单元的空间关联；
+# 结合类别和几何信息生成实例消息，按置信度加权聚合，并通过门控残差注入占据分支，再由原占据头完成预测。
+# 训练与推理均使用预测框建立关联，无需 GT 参与。
+#* 单卡训练(调试)
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=6 \
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+python tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_instance_bevfusion.yaml \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/debug/instance_bevfusion \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.samples_per_gpu 1 \
+  --data.workers_per_gpu 4 \
+  --max_epochs 6 \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.interval 3862 \
+  --evaluation.interval 3862 \
+  --max_keep_ckpt 1
+
+#* 多卡训练：3D检测引导的实例级占据特征融合实验
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=2,3 \
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+PYTHONWARNINGS=ignore \
+python -m torch.distributed.run \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=2 \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_instance_bevfusion.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/instance_bevfusion \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.samples_per_gpu 4 \
+  --data.workers_per_gpu 4 \
+  --max_epochs 6 \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.interval 3862 \
+  --evaluation.interval 3862 \
+  --max_keep_ckpt 1
+
+#* 3D检测实例引导 + 流式训练，decoder前融合
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+CUDA_VISIBLE_DEVICES=6,7 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_stream_instance_bevfusion.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_pre_cbgs_faug_skip10_rev10_instance \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.train.dataset.sequence_cbgs True \
+  --data.train.dataset.skip_empty_gt True \
+  --data.train.dataset.keep_consistent_seq_aug False \
+  --data.train.dataset.skip_prob 0.1 \
+  --data.train.dataset.sequence_flip_prob 0.1 \
+  --streaming.history_fusion.enabled True \
+  --streaming.bev_warp.enabled True \
+  --streaming.fuse_before_decoder True \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1

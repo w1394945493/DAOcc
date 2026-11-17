@@ -1,0 +1,288 @@
+# (11.16) 检测实例注入占据 BEV：新子类/模块，原配置和模型实现保持不变。
+# 基于 daocc_occ3d_nus_w_mask_inin_spconv2_voxel_iter.yaml；保留原编码器、损失和训练参数。
+#* Torchpack 自动合并上级 default.yaml，不会自动继承同目录的原模型文件。
+#* 原始数据根目录用于 nuScenes 数据表读取及检测评估，不能设为 info 输出目录。
+dataset_root: /home/wangyushen/Data/Datasets/Nuscenes/
+
+#* 新生成的 pkl 已包含各样本的 occ3d.occ_path，无需在训练配置中重复指定 gts。
+#* train 外层沿用 CBGSDataset，因此训练标注路径位于 data.train.dataset 下。
+data:
+  #* 每张 GPU 的 batch size；单卡先设为 1。
+  samples_per_gpu: 1
+  #* 每张 GPU 的数据加载进程数；设为 0 方便排查数据加载错误。
+  workers_per_gpu: 2
+
+  train:
+    dataset:
+      ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_train.pkl
+  val:
+    ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_val.pkl
+  test:
+    #* mini 的离线测试使用验证集及其真值。
+    ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_val.pkl
+
+# 每卡 batch size 已在上方设为1；候选提取和融合实现支持多BS。
+#* 显存不足时可通过命令行 --data.samples_per_gpu 1 覆盖。
+voxel_size: [0.075, 0.075, 0.2]
+point_cloud_range: [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+
+augment3d:
+  scale: [1., 1.]
+  rotate: [-0., 0.]
+  translate: 0.
+
+model:
+  type: InstanceBEVFusion
+  instance_to_occ: true
+  encoders:
+    lidar:
+      voxelize:
+        type: Spconv2Voxelization # 使用 spconv2 PointToVoxel；未配置 type 的原配置仍使用旧 Voxelization。
+        max_num_points: 10
+        point_cloud_range: ${point_cloud_range}
+        voxel_size: ${voxel_size}
+        max_voxels: [ 120000, 160000 ]
+      backbone:
+        type: SparseEncoderSpconv2 # 使用独立的官方 spconv 2.x 实现；原 SparseEncoder 和原配置不变。
+        in_channels: 5
+        sparse_shape: [ 1440, 1440, 41 ]
+        output_channels: 128
+        order:
+          - conv
+          - norm
+          - act
+        encoder_channels:
+          - [ 16, 16, 32 ]
+          - [ 32, 32, 64 ]
+          - [ 64, 64, 128 ]
+          - [ 128, 128 ]
+        encoder_paddings:
+          - [ 0, 0, 1 ]
+          - [ 0, 0, 1 ]
+          - [ 0, 0, [ 1, 1, 0 ] ]
+          - [ 0, 0 ]
+        block_type: basicblock
+    camera:
+      backbone:
+        type: ResNet
+        depth: 50
+        out_indices: [1, 2, 3]
+        # with_cp: true
+        init_cfg:
+          type: Pretrained
+          checkpoint: /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth
+      neck:
+        type: GeneralizedLSSFPN
+        in_channels: [512, 1024, 2048]
+        out_channels: 256
+        start_level: 0
+        num_outs: 3
+        norm_cfg:
+          type: BN2d
+          requires_grad: true
+        act_cfg:
+          type: ReLU
+          inplace: true
+        upsample_cfg:
+          mode: bilinear
+          align_corners: false
+      vtransform:
+        type: BEVTransformV2
+        top_type: lidar
+        x: [-54.0, 54.0]
+        y: [-54.0, 54.0]
+        z: [-5.0, 3.0]
+        xs: 180
+        ys: 180
+        zs: 10
+        input_size: [256, 704]
+        in_channels: 256
+        out_channels: 128
+  fuser:
+    type: ConvFuser
+    in_channels: [1280, 256]
+    out_channels: 512
+  decoder:
+    backbone:
+      type: CustomResNet
+      stride: [1, 1, 2]
+      numC_input : 512
+      num_channels: [128, 256, 512]
+    neck:
+      type: FPN_LSS
+      in_channels: 640
+      out_channels: 512
+      scale_factor: 2
+      extra_upsample: null
+  heads:
+    map: null
+    object:
+      type: ProposalHead
+      instance_selection:
+        score_threshold: 0.3  # 训练/推理相同；不使用 GT 质量筛选
+      in_channels: 512
+      train_cfg:
+        point_cloud_range: ${point_cloud_range}
+        grid_size: [ 1440, 1440, 41 ]
+        voxel_size: ${voxel_size}
+        out_size_factor: 8
+        dense_reg: 1
+        gaussian_overlap: 0.1
+        max_objs: 500
+        min_radius: 2
+        code_weights: [ 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2 ]
+      test_cfg:
+        post_center_limit_range: [ -61.2, -61.2, -10.0, 61.2, 61.2, 10.0 ]
+        max_per_img: 500
+        max_pool_nms: false
+        min_radius: [ 4, 12, 10, 1, 0.85, 0.175 ]
+        score_threshold: 0.1
+        out_size_factor: 8
+        voxel_size: ${voxel_size[:2]}
+        nms_type:
+          - circle
+          - rotate
+          - rotate
+          - circle
+          - rotate
+          - rotate
+        nms_scale:
+          - [ 1.0 ]
+          - [ 1.0, 1.0 ]
+          - [ 1.0, 1.0 ]
+          - [ 1.0 ]
+          - [ 1.0, 1.0 ]
+          - [ 2.5, 4.0 ]
+        pre_max_size: 1000
+        post_max_size: 83
+        nms_thr: 0.2
+      tasks:
+        - [ "car" ]
+        - [ "truck", "construction_vehicle" ]
+        - [ "bus", "trailer" ]
+        - [ "barrier" ]
+        - [ "motorcycle", "bicycle" ]
+        - [ "pedestrian", "traffic_cone" ]
+      common_heads:
+        reg: [ 2, 2 ]
+        height: [ 1, 2 ]
+        dim: [ 3, 2 ]
+        rot: [ 2, 2 ]
+        vel: [ 2, 2 ]
+      share_conv_channel: 64
+      bbox_coder:
+        type: CenterPointBBoxCoder
+        pc_range: ${point_cloud_range}
+        post_center_range: [ -61.2, -61.2, -10.0, 61.2, 61.2, 10.0 ]
+        max_num: 500
+        score_threshold: 0.1
+        out_size_factor: 8
+        voxel_size: ${voxel_size[:2]}
+        code_size: 9
+      separate_head:
+        type: SeparateHead
+        init_bias: -2.19
+        final_kernel: 3
+      loss_cls:
+        type: GaussianFocalLoss
+        reduction: mean
+      loss_bbox:
+        type: L1Loss
+        reduction: mean
+        loss_weight: 0.25
+      norm_bbox: true
+    occ:
+      type: InstanceBEVOCCHead2D
+      instance_fusion:
+        type: BoxBEVFusion
+        instance_channels: 64
+        bev_channels: 128
+        num_classes: 10
+        max_instances: 100  # 排除无 BEV 关联的框后，再按分数取上限
+        gate_init: 0.01  # 初始实例注入幅度较小，减轻训练早期低质量候选的影响
+      in_dim: 128
+      out_dim: 128
+      Dz: 16
+      use_mask: true
+      num_classes: 18
+      use_predicter: true
+      class_balance: false
+      loss_occ:
+        type: CrossEntropyLoss
+        use_sigmoid: false
+        ignore_index: 255
+        loss_weight: 1.0
+      coordinate_transform:
+        type: CrossCoordinateSample
+        point_range: [-40., 40., -40., 40., 0., 0.]
+        point_num: [200, 200, 1]
+        lidar_point_range: [-54.0, 54.0, -54.0, 54.0]
+        in_dim: 512
+        out_dim: 128
+  loss_scale:
+    object: 0.01
+    occ: 1.0
+
+# AdamW：沿用参考配置，学习率1e-4，前500个iteration线性warmup
+# warmup 从基础学习率的 1/3 逐步增加到 1e-4。
+optimizer:
+  type: AdamW
+  # lr: 2.0e-4
+  lr: 1.0e-4
+  weight_decay: 0.01
+
+optimizer_config:
+  grad_clip:
+    max_norm: 35
+    norm_type: 2
+
+# warmup 结束后，按照余弦退火逐渐降低学习率。
+# min_lr_ratio=1e-3，对应最低学习率1e-7。
+# MMCV默认按epoch调整学习率：训练最初500步：学习率线性增加；预热结束后：每个epoch开始时，根据余弦公式更新一次，统一epoch内保持不变
+lr_config:
+  policy: CosineAnnealing
+  warmup: linear
+  warmup_iters: 500
+  warmup_ratio: 0.33333333
+  min_lr_ratio: 1.0e-3
+  by_epoch: false       # 每个iteration更新余弦学习率；默认为true
+
+max_epochs: 6
+
+#*-------------------------------------------#
+#* runner 和 checkpoint_config: 仅涉及训练控制与保存
+runner:
+  type: ResumableEpochBasedRunner # 选择新增的ResumableEpochBasedRunner，支持记录并恢复轮内训练进度
+  max_epochs: ${max_epochs}
+  max_iters: null # 表示仍然按max_epoches完成训练
+
+# checkpoint_config：选择新增的 ResumableCheckpointHook，每 2000 步保存一次，最后一步也保存。
+# 每2000个全局iteration保存一次；训练最后一步也保存。
+checkpoint_config:
+  type: ResumableCheckpointHook
+  by_epoch: false
+  interval: 3000
+  save_last: true
+  save_optimizer: true
+  max_keep_ckpts: ${max_keep_ckpt}
+
+# 新实验独立评估输出，避免覆盖基线评估结果。
+evaluation:
+  jsonfile_prefix: /home/wangyushen/Data/Outputs/daocc/instance_bevfusion/eval
+  by_epoch: false     # 按全局iteration计数，而不是按epoch
+  interval: 3000      # 每完成2000步，执行一次完整验证集评估
+  evaluate_last: true # 训练最后一步也评估，即使不是2000的整数倍
+
+# EMA先更新，再随模型、优化器一起写入iter_N.pth。
+custom_hooks:
+  type: ResumableEMAHook
+  init_updates: 10560     # \[d=0.999\times\left(1-e^{-\text{updates}/2000}\right)\]
+  priority: ABOVE_NORMAL  # 控制 Hook 执行顺序：让 EMA 在普通 checkpoint 保存之前完成更新，确保同一文件里的模型与 EMA 对应同一步。
+  resume: null            # 不单独指定 EMA 权重文件。不代表禁止恢复 EMA；恢复训练时，从完整的 iter_N.pth 内部读取 EMA。
+  max_keep_ckpt: ${max_keep_ckpt}
+
+# 与基线使用相同的初始化来源：仅相机 backbone 加载上方 HTC 预训练权重。
+# 不加载完整训练模型，也不恢复优化器或训练进度；其余层按各模块初始化逻辑初始化。
+# 对照实验还需使用相同的训练预算、学习率及评估设置。
+load_from: null
+resume_from: null

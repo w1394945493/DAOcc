@@ -37,11 +37,13 @@ class BEVRefineNet(nn.Module):
 
 
 class BEVHistoryFusion(nn.Module):
-    def __init__(self, channels, internal_channels):
+    def __init__(self, channels, internal_channels, use_refine=True):
         super().__init__()
         if channels < 16 or channels % 16 or internal_channels <= 0:
             raise ValueError('channels must be divisible by 16; internal_channels must be positive')
-        self.refine_net = BEVRefineNet(channels, internal_channels)
+        #* (11.16) 默认先细化历史再融合；关闭时直接使用已对齐的历史特征。
+        # Identity 不创建细化参数，避免直接融合实验中出现未参与前向的可训练参数。
+        self.refine_net = BEVRefineNet(channels, internal_channels) if use_refine else nn.Identity()
         self.cat_block = nn.Sequential(
             nn.Conv2d(2 * channels, channels, 1, bias=False),
             nn.GroupNorm(16, channels), nn.ReLU(inplace=True))
@@ -51,4 +53,8 @@ class BEVHistoryFusion(nn.Module):
                 nn.init.xavier_uniform_(parameter)
 
     def forward(self, current, history):
-        return self.cat_block(torch.cat([self.refine_net(history), current], dim=1)) # (1 512 180 180) (1 512 180 180)
+        #* (11.16) 两种模式共用拼接融合：历史在前、当前在后，输出通道数保持不变。
+        # use_refine=False 时 refine_net 为恒等映射，不执行历史细化。
+        # nn.Identity() 是恒等映射：输入什么，就原样返回什么，没有参数，也不改变特征。
+        history = self.refine_net(history)
+        return self.cat_block(torch.cat([history, current], dim=1))

@@ -222,10 +222,12 @@ streaming:
   # 历史缓存跟随该位置；关闭历史融合时，也在选定位置缓存。
   # 本配置两处均为 512 通道；其他架构需同步核对 history_fusion.channels 和 BEV 空间范围。
   fuse_before_decoder: false
-  #* (11.12) 开启时使用二维 RefineNet + 拼接融合，并缓存融合结果；暂无辅助监督。
+  #* (11.16) 开启历史融合并缓存融合结果；可选是否先做二维 RefineNet 细化，暂无辅助监督。
   # 默认开启融合；仅缓存对比实验可用 --streaming.history_fusion.enabled False。
   history_fusion:
     enabled: true
+    #* (11.16) true：历史细化后拼接融合（默认）；false：直接拼接历史与当前特征并融合。
+    use_refine: true
     channels: 512
     internal_channels: 128
   #* (11.12) 参照 StreamOcc 逆向位姿采样，适配 DAOcc 的 [B,C,X,Y] BEV。

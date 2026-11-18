@@ -1,6 +1,7 @@
 """DAOcc streaming adapter with optional StreamOcc-style BEV aggregation."""
 from contextlib import contextmanager
 import torch
+import torch.nn.functional as F
 from mmdet3d.models.builder import FUSIONMODELS
 #*-----------------------------------------------------------#
 #* (11.12) BEV 缓存与对齐组件统一归入模型 utils。
@@ -29,6 +30,7 @@ class StreamingBEVFusion(BEVFusion):
             self.bev_warp.mask_outside = False
         self._stream_eval_enabled = False
         self._stream_metas = None
+        self._pending_observation = None
         self._pending_bev = None
         # Only alive during forward; process_history and visualization can read the mask/grid.
         self._history_alignment = None
@@ -42,10 +44,11 @@ class StreamingBEVFusion(BEVFusion):
         #* (11.12) DAOCC 使用当前训练权重评估；独立验证缓存替代 StreamOcc 的独立 EMA 对象。
         # 每轮验证从空缓存开始，结束或异常时恢复训练缓存，不重新计算或拷贝训练 BEV。
         saved = (self.bev_cache, self._stream_eval_enabled, self._stream_metas,
-                 self._pending_bev, self._history_alignment)
+                 self._pending_bev, self._history_alignment, self._pending_observation)
         self.bev_cache = BEVFeatureCache(enabled=saved[0].enabled)
         self._stream_eval_enabled = True
         self._stream_metas = None
+        self._pending_observation = None
         self._pending_bev = None
         self._history_alignment = None
         try:
@@ -53,7 +56,7 @@ class StreamingBEVFusion(BEVFusion):
         finally:
             self.bev_cache.reset()
             (self.bev_cache, self._stream_eval_enabled,
-             self._stream_metas, self._pending_bev, self._history_alignment) = saved
+             self._stream_metas, self._pending_bev, self._history_alignment, self._pending_observation) = saved
 
     def forward_single(self, *args, stream_metas=None, **kwargs):
         if not self.training and not self._stream_eval_enabled:
@@ -66,10 +69,11 @@ class StreamingBEVFusion(BEVFusion):
             result = super().forward_single(*args, **kwargs)
             if self._pending_bev is None:
                 raise RuntimeError('Streaming stage did not produce a BEV feature')
-            self.bev_cache.update(self._pending_bev, stream_metas)
+            self.bev_cache.update(self._pending_bev, stream_metas, self._pending_observation)
             return result
         finally:
             self._stream_metas = None
+            self._pending_observation = None
             self._pending_bev = None
             self._history_alignment = None
 
@@ -85,6 +89,9 @@ class StreamingBEVFusion(BEVFusion):
                 raise RuntimeError('历史与当前 BEV 的 shape 或 device 不一致')
             # Detached view is only held for this forward; cache.update makes the owned copy.
             self._pending_bev = current_bev.detach()
+            #* (11.17) 仅新路径保存融合前观测；成功前向后与融合状态共同写入缓存。
+            if self.history_fusion is not None and self.history_fusion.use_controlled_update:
+                self._pending_observation = current_bev.detach()
             #* (11.12) 在原始缓存快照上执行历史→当前 BEV 对齐，不覆盖缓存中的原始 BEV。
             # process_history 接收对齐结果；像素有效掩码、逆向变换和网格存于临时结果中。
             self._history_alignment = None
@@ -103,6 +110,29 @@ class StreamingBEVFusion(BEVFusion):
         """Refine aligned history, concatenate with current, then fuse."""
         if self.history_fusion is None:
             return current_bev
+        #*--------------------------------------------------------------#
+        #* (11.17) 新路径：两份历史共用 warp 网格和槽位有效性。
+        if self.history_fusion.use_controlled_update:
+            batch, _, nx, ny = current_bev.shape
+            mask = torch.zeros((batch, nx, ny), device=current_bev.device, dtype=torch.bool)
+            dt = torch.zeros(batch, device=current_bev.device, dtype=torch.float32)
+            observation = current_bev
+            if history_bev is None:
+                history_bev = current_bev
+            elif self._history_alignment is not None:
+                previous = self.bev_cache.observation
+                if previous is None or previous.shape != current_bev.shape or previous.device != current_bev.device:
+                    raise RuntimeError('Controlled update requires matching observation cache')
+                with torch.no_grad(), torch.cuda.amp.autocast(enabled=False):
+                    observation = F.grid_sample(previous.float(), self._history_alignment['grid'],
+                                                mode='bilinear', padding_mode='zeros', align_corners=True)
+                mask = self._history_alignment['valid_mask']
+                dt = torch.tensor([cur['timestamp'] - old['timestamp'] if valid else 0.
+                                   for cur, old, valid in zip(self._stream_metas, self.bev_cache.metas,
+                                                              history_valid.tolist())],
+                                  device=current_bev.device, dtype=torch.float32)
+            return self.history_fusion(current_bev, history_bev, observation, dt, mask)
+        #*--------------------------------------------------------------#
         #* (11.12) 参照 StreamOcc：首帧用当前特征；无效历史槽位单独替换。
         # 越界零填充照常参与融合，不使用空间掩码强制回退当前特征。
         if history_bev is None:

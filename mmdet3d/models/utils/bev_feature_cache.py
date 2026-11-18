@@ -9,6 +9,7 @@ class BEVFeatureCache:
         self.reset()
 
     def reset(self):
+        self.observation = None
         self.bev = None
         self.metas = None
         self.valid = None
@@ -31,13 +32,19 @@ class BEVFeatureCache:
         self.valid = torch.tensor(valid, dtype=torch.bool, device=self.bev.device)
         # Invalid slots are explicitly zeroed and must also be masked by future fusion.
         self.bev[~self.valid] = 0
+        if self.observation is not None:
+            self.observation[~self.valid] = 0
         return self.bev, self.valid
 
-    def update(self, bev, metas):
+    def update(self, bev, metas, observation=None):
         if not self.enabled:
             return
         if bev.ndim != 4 or bev.shape[0] != len(metas):
             raise ValueError('Expected BEV [B,C,X,Y] matching stream_metas')
+        #* (11.17) 两份缓存共用元数据和有效性，按一次成功前向共同提交。
+        if observation is not None and (observation.shape != bev.shape or observation.device != bev.device):
+            raise ValueError("Observation and memory must have matching shape/device")
+        self.observation = None if observation is None else observation.detach().clone()
         self.bev = bev.detach().clone()
         #* (11.12) 位姿及增强矩阵是嵌套 list，缓存持有独立快照。
         self.metas = deepcopy(metas)

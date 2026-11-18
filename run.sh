@@ -1814,8 +1814,8 @@ python -m torch.distributed.run \
   --checkpoint_config.interval 3862 \
   --evaluation.interval 3862 \
   --max_keep_ckpt 1
-
-#* 3D检测实例引导 + 流式训练，decoder前融合
+#*---------------------------------------------#
+#* (11.17) 3D检测实例引导 + 流式训练，decoder前融合
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 NUM_FRAMES=28130
@@ -1842,6 +1842,69 @@ CUDA_VISIBLE_DEVICES=6,7 torchrun \
   --streaming.history_fusion.enabled True \
   --streaming.bev_warp.enabled True \
   --streaming.fuse_before_decoder True \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1
+
+#*---------------------------------------------#
+#* (11.17) 流式占据预测：可视化各阶段BEV特征图
+# --steps 24 表示连续执行 24 次流式推理。
+# --shared-scale  共享色阶  更适合比较各阶段 BEV 特征的幅值变化：同一种颜色始终代表相同数值，能够看出细化、融合或 decoder 后特征整体增强还是减弱。
+# --save-video 是否保存视频
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0 python tools/visualize_streaming_bev_stages.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  /home/wangyushen/Data/Outputs/daocc/train/stream_pre_cbgs_faug_skip10_rev10/latest.pth \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/outputs/stream_bev_stages \
+  --steps 80 \
+  --workers 4 \
+  --precision fp16 \
+  --shared-scale \
+  --save-video \
+  --fps 2 \
+  --cfg-options \
+  streaming.fuse_before_decoder=True \
+  streaming.history_fusion.use_refine=True
+
+#* (11.17) 实验：decoder 前以观测变化驱动的历史更新替代 RefineNet，保留 Cat 融合。
+# 根据对齐后的观测差分 ΔF 和时间间隔 Δt 更新历史，沿用原检测、占据监督。
+# 子序列 CBGS + 逐帧独立增强 + 0.1 跳帧/反序；2卡总BS=8，训练84,390步。
+# 对照：stream_pre_cbgs_faug_skip10_rev10；新更新模块内部使用FP32。
+# --streaming.history_fusion.update_scale 0.01 \ ： 受控更新的缩放系数
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+CUDA_VISIBLE_DEVICES=2,3 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_pre_ctrl_cbgs_faug_skip10_rev10 \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.train.dataset.sequence_cbgs True \
+  --data.train.dataset.skip_empty_gt True \
+  --data.train.dataset.keep_consistent_seq_aug False \
+  --data.train.dataset.skip_prob 0.1 \
+  --data.train.dataset.sequence_flip_prob 0.1 \
+  --streaming.history_fusion.enabled True \
+  --streaming.bev_warp.enabled True \
+  --streaming.fuse_before_decoder True \
+  --streaming.history_fusion.use_controlled_update True \
+  --streaming.history_fusion.update_scale 0.01 \
   --data.samples_per_gpu "$BATCH_SIZE" \
   --data.workers_per_gpu "$NUM_WORKERS" \
   --runner.max_iters "$MAX_ITERS" \

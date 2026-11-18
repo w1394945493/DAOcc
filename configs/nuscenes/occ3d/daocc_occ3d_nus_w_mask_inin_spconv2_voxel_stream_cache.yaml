@@ -228,6 +228,10 @@ streaming:
     enabled: true
     #* (11.16) true：历史细化后拼接融合（默认）；false：直接拼接历史与当前特征并融合。
     use_refine: true
+    #* (11.17) 开启后替代 RefineNet；use_refine 仅控制原路径。
+    use_controlled_update: false
+    update_scale: 0.1 #  受控更新的缩放系数
+    time_scale: 1.0
     channels: 512
     internal_channels: 128
   #* (11.12) 参照 StreamOcc 逆向位姿采样，适配 DAOcc 的 [B,C,X,Y] BEV。

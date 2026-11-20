@@ -118,6 +118,14 @@ model:
     map: null
     object:
       type: ProposalHead
+      #* (11.19) ROI 模式优先；开启后不创建多点偏移/权重网络，原配置行为默认保留。
+      roi_features: false
+      roi_output_size: 3  # 每个框对齐为 3×3 区域特征，再空间平均。
+      roi_sampling_ratio: 2  # 每区域 2×2 个插值点，共36点，无新增可学习参数。
+      #* (11.19) 仅以框内采样特征自适应聚合；multi_point_features=false 恢复单点。
+      multi_point_features: true
+      learnable_sampling: true  # false：固定五点；true：由实例特征预测框内偏移。
+      sampling_points: 5  # 可学习采样点数 K；来源网格仅预测偏移和权重，不混入实例特征。
       instance_selection:
         score_threshold: 0.3  # 训练/推理相同；不使用 GT 质量筛选
       in_channels: 512
@@ -195,6 +203,9 @@ model:
       type: InstanceBEVOCCHead2D
       instance_fusion:
         type: BoxBEVFusion
+        #* (11.19) 聚合前逐边匹配；局部枚举仍保留旋转框精确检查。
+        edge_matching: true
+        local_edges: true
         instance_channels: 64
         bev_channels: 128
         num_classes: 10

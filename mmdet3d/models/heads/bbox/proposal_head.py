@@ -1,5 +1,6 @@
 """CenterHead 候选框及来源特征接口；原检测输出和损失接口保持兼容。"""
 import torch
+import torch.nn.functional as F
 
 from mmdet3d.core import circle_nms, xywhr2xyxyr
 from mmdet3d.models.builder import HEADS
@@ -9,8 +10,50 @@ from .centerpoint import CenterHead
 
 @HEADS.register_module()
 class ProposalHead(CenterHead):
-    def __init__(self, *args, instance_selection=None, **kwargs):
+    def __init__(self, *args, instance_selection=None, multi_point_features=False,
+                 learnable_sampling=False, sampling_points=5,
+                 roi_features=False, roi_output_size=3, roi_sampling_ratio=2, **kwargs):
         super().__init__(*args, **kwargs)
+        #* (11.19) ROI 优先于多点模式；不构建偏移/权重网络，不混入来源网格向量。
+        self.roi_features = roi_features
+        for value in (roi_output_size, roi_sampling_ratio):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError('roi_output_size 和 roi_sampling_ratio 必须为正整数')
+        self.roi_output_size = roi_output_size
+        self.roi_sampling_ratio = roi_sampling_ratio
+        multi_point_features = multi_point_features and not roi_features
+        self.multi_point_features = multi_point_features
+        #* (11.19) 多点模式下可预测每个实例自己的 K 个偏移；False 保留固定五点。
+        if not isinstance(sampling_points, int) or isinstance(sampling_points, bool) or sampling_points < 1:
+            raise ValueError('sampling_points 必须是正整数')
+        self.sampling_points = sampling_points
+        self.offset_predictor = None
+        if learnable_sampling and multi_point_features:
+            channels = self.shared_conv.conv.out_channels
+            self.offset_predictor = torch.nn.Sequential(
+                torch.nn.LayerNorm(channels), torch.nn.Linear(channels, 2 * sampling_points))
+            # 初始点分散，避免所有点重合后因对称梯度始终学习同一位置。
+            if sampling_points == 5:
+                initial = torch.tensor([[0., 0.], [-.25, -.25], [.25, -.25],
+                                        [-.25, .25], [.25, .25]])
+            elif sampling_points == 1:
+                initial = torch.zeros(1, 2)
+            else:
+                angles = torch.arange(sampling_points) * (2 * torch.pi / sampling_points)
+                initial = .25 * torch.stack([angles.cos(), angles.sin()], -1)
+            torch.nn.init.zeros_(self.offset_predictor[-1].weight)
+            with torch.no_grad():
+                self.offset_predictor[-1].bias.copy_(torch.atanh(2 * initial).reshape(-1))
+        #* (11.19) 仅从采样点构建实例特征：每实例预测 K 个权重，softmax 自适应聚合。
+        # 来源向量仅用于预测位置/权重，不再以残差或固定比例混入输出。
+        self.sample_weight_predictor = None
+        if multi_point_features:
+            channels = self.shared_conv.conv.out_channels
+            count = sampling_points if learnable_sampling else 5
+            self.sample_weight_predictor = torch.nn.Sequential(
+                torch.nn.LayerNorm(channels), torch.nn.Linear(channels, count))
+            torch.nn.init.zeros_(self.sample_weight_predictor[-1].weight)
+            torch.nn.init.zeros_(self.sample_weight_predictor[-1].bias)
         selection = dict(instance_selection or {})
         self.instance_score_threshold = float(selection.pop('score_threshold', 0.3))
         if selection or not 0 <= self.instance_score_threshold <= 1:
@@ -28,6 +71,10 @@ class ProposalHead(CenterHead):
                 raise ValueError('ProposalHead 仅支持单尺度检测 BEV')
             feats = feats[0]
         source = self.shared_conv(feats) # 原有共享卷积
+        # 空候选或关闭注入时仍让偏移参数接入检测图，DDP 获得零梯度；不改变预测数值。
+        for predictor in (self.offset_predictor, self.sample_weight_predictor):
+            if predictor is not None:
+                source = source + sum(p.reshape(-1)[0] * 0 for p in predictor.parameters())
         # 与父类 multi_apply(forward_single, [feats]) 的任务/尺度嵌套保持一致。
         predictions = tuple([task(source)] for task in self.task_heads) # 原有各任务预测分支
         
@@ -148,7 +195,7 @@ class ProposalHead(CenterHead):
                                     labels=labels[b, keep] + offset, source_indices=indices[b, keep],
                                     task_ids=torch.full_like(indices[b, keep], task)))
             offset += self.num_classes[task]
-        #* 4. 按来源网格提取实例特征，用于占据融合，而非对框内区域做 ROI 池化。
+        #* 4. 实例特征三选一：ROI 区域特征、多点加权特征、原来源网格特征。
         # 展平顺序与解码得到的 source_indices 一致：[B,C,X,Y] → [B,X*Y,C]。
         flat = source.permute(0, 2, 3, 1).reshape(batch, -1, channels)
         result = []
@@ -160,6 +207,18 @@ class ProposalHead(CenterHead):
             # 几何解码/筛选无梯度，但这里保留 source 的梯度，允许占据损失回传检测特征。
             # 占据范围交集与融合实例数量上限由后续 BoxBEVFusion.build_edges 处理。
             item['features'] = flat[b, item['source_indices']]
+            #* (11.19) 多点模式仅聚合采样特征；来源向量只用于预测采样位置与权重。
+            # 不改变检测框/分数/NMS；框坐标 detach，但可学习偏移保留梯度。
+            # 占据监督通过 grid_sample 同时训练偏移网络和检测来源特征。
+            if self.roi_features:
+                item['features'], valid_rois = self._roi_instance_features(source[b:b+1], item['boxes'])
+                # 无有效采样区域的框仅从注入实例中移除，已保存的检测结果不变。
+                item = {key: value[valid_rois] for key, value in item.items()}
+            elif self.multi_point_features:
+                item['features'] = self._sample_instance_features(source[b:b+1], item)
+                # 全部采样越界的实例不参与注入；不退回来源特征，检测输出不受影响。
+                valid_samples = item.pop('sampling_valid')
+                item = {key: value[valid_samples] for key, value in item.items()}
             result.append(item)
         #* 5. 返回注入实例；推理时同时返回之前保留的完整检测结果。
         # format_detections 仅整理输出格式、将中心 z 转为底面 z，不重复执行后处理。
@@ -168,6 +227,90 @@ class ProposalHead(CenterHead):
             detections = self.format_detections(detection_rows, metas)
             return result, detections
         return result
+
+    def _roi_instance_features(self, source, boxes):
+        """旋转 ROI 对齐：每 bin 固定 r×r 双线性采样，bin 均值后空间平均。
+
+        用 grid_sample 实现，不依赖额外旋转 ROI CUDA 扩展。沿用本检测头解码
+        坐标约定（整数索引对应来源格），不额外套用图像 ROI 的半像素平移。
+        边界策略：越界采样点不参与 bin 平均，空 bin 不参与空间平均。
+        因此不宣称与采用零填充等边界策略的第三方算子逐元素相同。
+        """
+        n, channels = len(boxes), source.shape[1]
+        if n == 0:
+            return source.permute(0, 2, 3, 1).reshape(-1, channels)[:0], boxes.new_zeros((0,), dtype=torch.bool)
+        with torch.cuda.amp.autocast(enabled=False):
+            #* 1. 框仅定义采样区域，detach 断开坐标梯度；保留 source 的特征梯度。
+            boxes = boxes.detach().float()
+            size, ratio = self.roi_output_size, self.roi_sampling_ratio
+            steps = size * ratio
+            axis = (torch.arange(steps, device=source.device, dtype=torch.float32) + .5) / steps - .5
+            y, x = torch.meshgrid(axis, axis, indexing='ij')
+            offsets = torch.stack([x, y], -1).reshape(-1, 2)
+            local = boxes[:, None, 3:5] * offsets
+            c, sn = boxes[:, 6:7].cos(), boxes[:, 6:7].sin()
+            xy = torch.stack([c * local[..., 0] - sn * local[..., 1],
+                              sn * local[..., 0] + c * local[..., 1]], -1) + boxes[:, None, :2]
+            coder = self.bbox_coder
+            ij = (xy - xy.new_tensor(coder.pc_range[:2])) / (xy.new_tensor(coder.voxel_size[:2]) * coder.out_size_factor)
+            h, w = source.shape[-2:]
+            valid = torch.isfinite(ij).all(-1)
+            valid &= (ij[..., 0] >= 0) & (ij[..., 0] <= w - 1)
+            valid &= (ij[..., 1] >= 0) & (ij[..., 1] <= h - 1)
+            valid &= (torch.isfinite(boxes).all(-1) & (boxes[:, 3:6] > 0).all(-1))[:, None]
+            grid = 2 * (ij + .5) / ij.new_tensor([w, h]) - 1
+            grid = torch.where(valid[..., None], grid, torch.zeros_like(grid))
+            #* 2. 一次批量采样，不逐框复制整张源特征图；N×(size*ratio)^2 个查询。
+            samples = F.grid_sample(source.float(), grid[None], align_corners=False)[0].permute(1, 2, 0)
+            samples = torch.where(valid[..., None], samples, torch.zeros_like(samples))
+            samples = samples.reshape(n, size, ratio, size, ratio, channels)
+            mask = valid.reshape(n, size, ratio, size, ratio)
+            counts = mask.sum((2, 4))
+            #* 3. 得到 [N,size,size,C] ROI 特征，再对有效 bin 做平均，输出 [N,C]。
+            roi = samples.sum((2, 4)) / counts.clamp_min(1)[..., None]
+            bin_valid = counts > 0
+            pooled = roi.sum((1, 2)) / bin_valid.sum((1, 2)).clamp_min(1)[:, None]
+            return pooled.to(source.dtype), bin_valid.flatten(1).any(-1)
+
+    def _sample_instance_features(self, source, item):
+        """按解码公式反求特征图索引；grid_sample 的 x 对应列，y 对应行。"""
+        if not len(item['boxes']):
+            item['sampling_valid'] = item['scores'].new_zeros((0,), dtype=torch.bool)
+            return item['features']
+        with torch.cuda.amp.autocast(enabled=False):
+            boxes = item['boxes'].detach().float()
+            if self.offset_predictor is None:
+                # 原固定五点路径保留，sampling_points 仅控制可学习路径。
+                offsets = boxes.new_tensor([[0., 0.], [-.25, -.25], [.25, -.25],
+                                            [-.25, .25], [.25, .25]])
+            else:
+                #* (11.19) 来源特征 → 每实例 K×2 偏移；0.5*tanh 限制在框局部范围。
+                # 这里不能 detach 偏移，否则占据损失不能学习采样位置。
+                offsets = .5 * self.offset_predictor(item['features'].float()).reshape(-1, self.sampling_points, 2).tanh()
+            local = boxes[:, None, 3:5] * offsets
+            c, sn = boxes[:, 6].cos()[:, None], boxes[:, 6].sin()[:, None]
+            xy = torch.stack([c * local[..., 0] - sn * local[..., 1],
+                              sn * local[..., 0] + c * local[..., 1]], -1) + boxes[:, None, :2]
+            coder = self.bbox_coder
+            step = xy.new_tensor(coder.voxel_size[:2]) * coder.out_size_factor
+            ij = (xy - xy.new_tensor(coder.pc_range[:2])) / step
+            h, w = source.shape[-2:]
+            # 反解 _decode_task 的坐标，索引0即来源特征第0个元素，不额外减半格。
+            valid = torch.isfinite(ij).all(-1)
+            valid &= (ij[..., 0] >= 0) & (ij[..., 0] <= w - 1)
+            valid &= (ij[..., 1] >= 0) & (ij[..., 1] <= h - 1)
+            grid = 2 * (ij + .5) / ij.new_tensor([w, h]) - 1
+            grid = torch.where(valid[..., None], grid, torch.zeros_like(grid))
+            samples = F.grid_sample(source.float(), grid[None], align_corners=False)[0].permute(1, 2, 0)
+            # 旧实现（保留说明）：pooled=有效点平均；输出=0.5*来源+0.5*pooled。
+            #* (11.19) 新实现：只对有效采样点归一化；初始等权，随后由占据损失学习权重。
+            logits = self.sample_weight_predictor(item['features'].float())
+            logits = logits.masked_fill(~valid, torch.finfo(logits.dtype).min)
+            weights = logits.softmax(-1) * valid
+            weights = weights / weights.sum(-1, keepdim=True).clamp_min(1e-6)
+            item['sampling_valid'] = valid.any(-1)
+            # 全无效时 weights 全0，避免全 -inf softmax 的 NaN；上层再移除此实例。
+            return (samples * weights[..., None]).sum(1).to(source.dtype)
 
     @torch.no_grad()
     def format_detections(self, rows, metas):

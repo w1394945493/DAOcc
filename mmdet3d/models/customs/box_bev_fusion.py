@@ -8,12 +8,25 @@ from mmdet3d.models.builder import CUSTOMS
 @CUSTOMS.register_module()
 class BoxBEVFusion(nn.Module):
     def __init__(self, instance_channels=64, bev_channels=128, num_classes=10,
-                 max_instances=100, gate_init=0.01):
+                 max_instances=100, gate_init=0.01,
+                 edge_matching=False, local_edges=False):
         super().__init__()
         if max_instances < 1 or not 0 < gate_init < 1:
             raise ValueError('max_instances须为正，gate_init须在(0,1)内')
         self.max_instances = max_instances
         self.bev_channels = bev_channels
+        #* (11.19) 独立开关：旧配置不改变；新配置显式开启逐边匹配和局部枚举。
+        self.local_edges = local_edges
+        self.edge_match = None
+        if edge_matching:
+            # 先加 LayerNorm，主要是因为输入拼接了三种数值尺度可能不同的信息：实例特征：经过线性投影，并加上类别编码；当前占据特征：来自占据 BEV；几何信息：包含归一化位置、对数尺寸、正余弦及检测分数。
+            # LayerNorm(265) 对每条边自己的 265 维输入进行归一化，避免匹配网络过度受某部分输入幅值影响。它不会在不同边之间求平均，也不依赖 batch 大小。
+            self.edge_match = nn.Sequential(
+                nn.LayerNorm(2 * bev_channels + 9),
+                nn.Linear(2 * bev_channels + 9, 32), nn.ReLU(), nn.Linear(32, 1))
+            # 初始 sigmoid=0.5，只保守接收消息；不是经过标定的检测置信度。
+            nn.init.zeros_(self.edge_match[-1].weight)
+            nn.init.zeros_(self.edge_match[-1].bias)
         self.content = nn.Linear(instance_channels, bev_channels)
         self.category = nn.Embedding(num_classes, bev_channels)
         # 局部归一化 XY(2)、中心高度(1)、log尺寸(3)、sin/cos(2)、置信度(1)。
@@ -43,8 +56,14 @@ class BoxBEVFusion(nn.Module):
             return lidar @ aug[:, :3, :3].transpose(1, 2) + aug[:, None, :3, 3]
 
     @torch.no_grad()
-    def build_edges(self, points, instances, source_bounds):
+    def build_edges(self, points, instances, source_bounds, grid_shape=None):
         """分块建边，内存不构造 N×M×C；无交集的框不占实例数量配额。"""
+        
+        #*----------------------------------------------------------------------------#
+        #* (11.19) forward 提供真实网格形状；外部旧调用不传形状时仍走原全网格路径。
+        if self.local_edges and grid_shape is not None:
+            return self._local_edges(points, instances, source_bounds, grid_shape)
+        
         # C2. 对应可视化 make_edges(..., use_height=False)：单个样本内按框建平面连接。
         # points和boxes均在增强后LiDAR系；连接目标仍保留原ego占据网格的展平编号。
         boxes, scores = instances['boxes'].detach().float(), instances['scores'].detach().float()
@@ -135,6 +154,68 @@ class BoxBEVFusion(nn.Module):
                          sn[:, None], c[:, None], scores[src, None]], dim=-1)
         return src, dst, geo
 
+    @torch.no_grad()
+    def _local_edges(self, points, instances, source_bounds, grid_shape):
+        """规则 OCC 平面经仿射变换后，在网格索引空间局部枚举，再精确检查旋转框。"""
+        height, width = grid_shape
+        # 单行/单列没有可逆二维基底，复用原判断。
+        if min(height, width) < 2:
+            return self.build_edges(points, instances, source_bounds)
+        boxes, scores = instances['boxes'].detach().float(), instances['scores'].detach().float()
+        order = scores.argsort(descending=True)
+        boxes_sorted = boxes[order]
+        good = torch.isfinite(boxes_sorted).all(-1) & (boxes_sorted[:, 3:6] > 0).all(-1)
+        good &= torch.isfinite(scores[order])
+        # 不让非法框进入坐标转换和整数化；对应枚举长度随后置0。
+        safe = torch.where(good[:, None], boxes_sorted, torch.zeros_like(boxes_sorted))
+        origin = points[0, :2]
+        basis = torch.stack([points[1, :2] - origin, points[width, :2] - origin])
+        # 基底分别对应列、行步长，支持非方形网格、旋转、翻转、缩放和倾斜投影。
+        if not torch.isfinite(basis).all() or basis.det().abs() < 1e-8:
+            return self.build_edges(points, instances, source_bounds)
+        offsets = safe.new_tensor([[-.5, -.5], [.5, -.5], [-.5, .5], [.5, .5]])
+        local = safe[:, None, 3:5] * offsets
+        c, sn = safe[:, 6].cos()[:, None], safe[:, 6].sin()[:, None]
+        corners = torch.stack([c * local[..., 0] - sn * local[..., 1],
+                               sn * local[..., 0] + c * local[..., 1]], -1) + safe[:, None, :2]
+        ij = (corners - origin) @ torch.linalg.inv(basis)
+        # 多留一格消除浮点边界舍入漏边；最终仍用原旋转框条件精确裁掉。
+        low = (ij.amin(1).floor() - 1).clamp(min=0)
+        high = ij.amax(1).ceil() + 1
+        limits = ij.new_tensor([width - 1, height - 1])
+        low = torch.minimum(low, limits + 1).long()
+        high = torch.minimum(high, limits).clamp(min=-1).long()
+        sizes = (high - low + 1).clamp_min(0)
+        counts = sizes.prod(-1) * good.long()
+        # 一次批量生成变长局部区域，避免逐框 Python/CUDA 同步；不构造 N×全网格掩码。
+        rank = torch.repeat_interleave(torch.arange(len(order), device=points.device), counts)
+        starts = counts.cumsum(0) - counts
+        offset = torch.arange(rank.numel(), device=points.device) - starts[rank]
+        cols = low[rank, 0] + offset % sizes[rank, 0].clamp_min(1)
+        rows = low[rank, 1] + offset // sizes[rank, 0].clamp_min(1)
+        dst = rows * width + cols
+        box = boxes_sorted[rank]
+        delta = points[dst, :2] - box[:, :2]
+        c, sn = box[:, 6].cos(), box[:, 6].sin()
+        xy = torch.stack([c * delta[:, 0] + sn * delta[:, 1],
+                          -sn * delta[:, 0] + c * delta[:, 1]], -1)
+        xmin, ymin, xmax, ymax = source_bounds
+        inside = (xy.abs() <= box[:, 3:5] / 2).all(-1)
+        inside &= torch.isfinite(points[dst]).all(-1)
+        inside &= (points[dst, 0] >= xmin) & (points[dst, 0] < xmax)
+        inside &= (points[dst, 1] >= ymin) & (points[dst, 1] < ymax)
+        rank, dst, xy = rank[inside], dst[inside], xy[inside]
+        # 与旧实现一致：按分数取有交集的前 max_instances 个框，而非先截断候选。
+        occupied = torch.bincount(rank, minlength=len(order)) > 0
+        keep = occupied.long().cumsum(0)[rank] <= self.max_instances
+        rank, dst, xy = rank[keep], dst[keep], xy[keep]
+        src = order[rank]
+        box = boxes[src]
+        geo = torch.cat([xy / box[:, 3:5].clamp_min(1e-3), box[:, 2:3] / 10,
+                         box[:, 3:6].clamp_min(1e-3).log(), box[:, 6:7].sin(),
+                         box[:, 6:7].cos(), scores[src, None]], -1)
+        return src, dst, geo
+
     def forward(self, bev, instances, points, source_bounds):
         """每个样本独立聚合；未关联单元的更新严格为0，返回原 dtype/形状。"""
         bsz, channels, height, width = bev.shape
@@ -155,7 +236,7 @@ class BoxBEVFusion(nn.Module):
                 item = instances[b] # 第b个样本的全部候选实例组成的字典
                 #*-----------------------------------------------------------------------------#
                 # 构建边邻接关系：points[b]：第 b 个样本中，每个占据 BEV 单元对应的空间查询点坐标，
-                src, dst, geo = self.build_edges(points[b].detach().float(), item, source_bounds)
+                src, dst, geo = self.build_edges(points[b].detach().float(), item, source_bounds, (height, width))
                 # D1. 每次只处理本样本的局部索引，无跨batch连接；flat为[Yocc*Xocc,C]。
                 if src.numel():
                     #*-------------------------------------------------------------------------#
@@ -163,8 +244,20 @@ class BoxBEVFusion(nn.Module):
                     # D2. 64维来源特征投影到128维，并加入检测类别embedding。
                     # content[src]把同一实例复制到它的各条边，再加每条边的几何编码形成消息。
                     content = self.content(item['features'].float()) + self.category(item['labels'])
+                    # 消息仍编码实例与相对几何；新增匹配分支在聚合之前参考目标单元。
                     messages = self.message(content[src] + self.geometry(geo)) # 消息包含：检测来源网格提取的实例特征；检测类别 embedding；实例与目标单元之间的几何信息。
                     weights = item['scores'].detach().float()[src].clamp(0, 1)[:, None]
+                    #* (11.19) 每条边联合实例、目标占据单元和几何，学习接收程度。
+                    # 检测分数作为先验；sigmoid 不强迫所有实例权重和为1，允许都不接收。
+                    # 后续保留原归一化与总权重幅度控制，避免单边时匹配权重被完全抵消。
+                    if self.edge_match is not None:
+                        #*----------------------------------------------------------------------#
+                        # 实例内容 content[i]     [128]  实例特征投影 + 类别编码  
+                        # 目标单元 flat[j]        [128]  尚未注入的占据 BEV 特征
+                        # 相对几何 geo[i,j]       [9]    相对位置、框尺寸、朝向等
+                        # 同一个实例连接不同单元时，目标特征和相对位置不同，匹配权重也可以不同。
+                        match = self.edge_match(torch.cat([content[src], flat[dst], geo], -1)).sigmoid()
+                        weights = weights * match
                     # D3. index_add按dst将消息汇入目标BEV；重叠实例按置信度归一化，
                     # 避免仅因连接数量更多导致消息幅值线性增大。未关联单元total=denom=0。
                     #* (11.16) 优化前全网格聚合/门控实现保留如下（仅注释，不执行）。

@@ -1791,7 +1791,7 @@ python tools/dist_train.py \
   --evaluation.interval 3862 \
   --max_keep_ckpt 1
 
-#* 多卡训练：3D检测引导的实例级占据特征融合实验
+#* 多卡训练：单帧训练：3D检测引导的实例级占据特征融合实验
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 CUDA_VISIBLE_DEVICES=2,3 \
@@ -1814,6 +1814,7 @@ python -m torch.distributed.run \
   --checkpoint_config.interval 3862 \
   --evaluation.interval 3862 \
   --max_keep_ckpt 1
+
 #*---------------------------------------------#
 #* (11.17) 3D检测实例引导 + 流式训练，decoder前融合
 conda activate daocc-cu121
@@ -1849,7 +1850,104 @@ CUDA_VISIBLE_DEVICES=6,7 torchrun \
   --checkpoint_config.interval "$INTERVAL" \
   --log_config.interval 50 \
   --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1 \
+  --model.heads.object.multi_point_features False \
+  --model.heads.object.learnable_sampling False \
+  --model.heads.occ.instance_fusion.edge_matching False \
+  --model.heads.occ.instance_fusion.local_edges False \
+
+#* (11.19) 验证固定采样及自适应加权构建实例特征；关闭逐边匹配。
+# 来源特征仅预测采样权重，不预测偏移，也不直接混入最终实例特征。
+# multi_point_features=True：启用多点采样及可学习权重聚合。
+# learnable_sampling=True：启用可学习偏移；False 为固定五点，权重仍可学习。
+# sampling_points=5：可学习采样点数量。
+# edge_matching=False：关闭逐边内容匹配。
+# local_edges=True：局部枚举建边，作为计算优化。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+CUDA_VISIBLE_DEVICES=6,7 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_stream_instance_bevfusion.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_pre_cbgs_faug_skip10_rev10_instance_sample_fixed \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --model.heads.object.multi_point_features True \
+  --model.heads.object.learnable_sampling False \
+  --model.heads.object.sampling_points 5 \
+  --model.heads.occ.instance_fusion.edge_matching False \
+  --model.heads.occ.instance_fusion.local_edges True \
+  --data.train.dataset.sequence_cbgs True \
+  --data.train.dataset.skip_empty_gt True \
+  --data.train.dataset.keep_consistent_seq_aug False \
+  --data.train.dataset.skip_prob 0.1 \
+  --data.train.dataset.sequence_flip_prob 0.1 \
+  --streaming.history_fusion.enabled True \
+  --streaming.bev_warp.enabled True \
+  --streaming.fuse_before_decoder True \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
   --checkpoint_config.max_keep_ckpts 1
+
+#* ROI 实例特征对照：旋转区域对齐后平均池化，不混入来源特征。
+# 无可学习偏移、采样权重或逐边匹配；其他流式训练设置保持一致。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+CUDA_VISIBLE_DEVICES=2,3 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_stream_instance_bevfusion.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_pre_cbgs_faug_skip10_rev10_instance_roi \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --model.heads.object.roi_features True \
+  --model.heads.object.roi_output_size 3 \
+  --model.heads.object.roi_sampling_ratio 2 \
+  --model.heads.object.multi_point_features False \
+  --model.heads.object.learnable_sampling False \
+  --model.heads.occ.instance_fusion.edge_matching False \
+  --model.heads.occ.instance_fusion.local_edges True \
+  --data.train.dataset.sequence_cbgs True \
+  --data.train.dataset.skip_empty_gt True \
+  --data.train.dataset.keep_consistent_seq_aug False \
+  --data.train.dataset.skip_prob 0.1 \
+  --data.train.dataset.sequence_flip_prob 0.1 \
+  --streaming.history_fusion.enabled True \
+  --streaming.bev_warp.enabled True \
+  --streaming.fuse_before_decoder True \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1
+
+
 
 #*---------------------------------------------#
 #* (11.17) 流式占据预测：可视化各阶段BEV特征图
@@ -1872,7 +1970,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/visualize_streaming_bev_stages.py \
   streaming.fuse_before_decoder=True \
   streaming.history_fusion.use_refine=True
 
-#* (11.17) 实验：decoder 前以观测变化驱动的历史更新替代 RefineNet，保留 Cat 融合。
+#* (11.18) 实验：decoder 前以观测变化驱动的历史更新替代 RefineNet，保留 Cat 融合。
 # 根据对齐后的观测差分 ΔF 和时间间隔 Δt 更新历史，沿用原检测、占据监督。
 # 子序列 CBGS + 逐帧独立增强 + 0.1 跳帧/反序；2卡总BS=8，训练84,390步。
 # 对照：stream_pre_cbgs_faug_skip10_rev10；新更新模块内部使用FP32。

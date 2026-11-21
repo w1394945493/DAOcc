@@ -1,5 +1,5 @@
-# import setproctitle
-# setproctitle.setproctitle("wangyushen")
+import setproctitle
+setproctitle.setproctitle("wangyushen_daocc")
 
 import argparse
 import copy

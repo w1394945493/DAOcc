@@ -2171,7 +2171,7 @@ CUDA_VISIBLE_DEVICES=6 python tools/compare_gaussian_bev.py \
 #* 单帧训练：BEVTransformV2 替换为 GaussianBEVTransform
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
-CUDA_VISIBLE_DEVICES=6,7 \
+CUDA_VISIBLE_DEVICES=2,3 \
 PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
 PYTHONWARNINGS=ignore \
 python -m torch.distributed.run \
@@ -2192,11 +2192,18 @@ python -m torch.distributed.run \
   --evaluation.interval 3862 \
   --max_keep_ckpt 1
 
-# 单帧、单卡训练：将BEVTransformV2替换为GaussianBEVTransform
-# 使用GPU 6；samples_per_gpu表示该单卡上的batch size。
-# --optimizer.lr 1.0e-4
-# --checkpoint_config.interval 7724 \
-# --evaluation.interval 7724
+#* 单帧、单卡训练：将BEVTransformV2替换为GaussianBEVTransform
+  # --optimizer.lr 2.0e-4 \
+  # --data.samples_per_gpu 8 \
+  # --data.workers_per_gpu 4 \
+  # --checkpoint_config.interval 3862 \
+  # --evaluation.interval 3862 \
+
+  # --optimizer.lr 1.0e-4 \
+  # --data.samples_per_gpu 4 \
+  # --data.workers_per_gpu 4 \
+  # --checkpoint_config.interval 7724 \
+  # --evaluation.interval 7724 \
 
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
@@ -2207,12 +2214,12 @@ python tools/train.py \
   configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_gaussian_bev_iter.yaml \
   --run-dir /home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_gaussian_bev_iter_fp16_htc_single_gpu \
   --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
-  --data.samples_per_gpu 8 \
-  --data.workers_per_gpu 4 \
   --max_epochs 6 \
   --log_config.interval 50 \
-  --optimizer.lr 2.0e-4 \
-  --checkpoint_config.interval 3862 \
-  --evaluation.interval 3862 \
+  --optimizer.lr 1.0e-4 \
+  --data.samples_per_gpu 4 \
+  --data.workers_per_gpu 4 \
+  --checkpoint_config.interval 7724 \
+  --evaluation.interval 7724 \
   --max_keep_ckpt 1
 

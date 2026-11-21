@@ -64,7 +64,7 @@ class StageCapture:
         self.model.process_history = MethodType(capture, self.model)
         #* (11.17) 第三格捕获当前配置实际执行的历史更新模块。
         fusion = self.model.history_fusion
-        updater = fusion.state_update if fusion.use_controlled_update else fusion.refine_net
+        updater = fusion.history_updater
         self.handles.append(updater.register_forward_hook(
             lambda module, inputs, output: self.save('refined_history', output)))
         self.handles.append(self.model.decoder['neck'].register_forward_hook(
@@ -104,6 +104,7 @@ def save_frame(root, capture, step, bounds, shared_scale):
         stem = f"step_{step:05d}_{safe_name(meta['token'])}"
         titles = ['1. Cached history (previous coordinates)',
                   '2. Ego-motion + augmentation warp',
+                  '3. Observation-guided refinement' if capture.model.history_fusion.mode == 'guided_refine' else
                   '3. Observation-controlled history update' if capture.model.history_fusion.use_controlled_update else
                   '3. Refined history' if not isinstance(capture.model.history_fusion.refine_net, torch.nn.Identity)
                   else '3. Aligned history (RefineNet disabled)',

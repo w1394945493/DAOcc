@@ -90,7 +90,7 @@ class StreamingBEVFusion(BEVFusion):
             # Detached view is only held for this forward; cache.update makes the owned copy.
             self._pending_bev = current_bev.detach()
             #* (11.17) 仅新路径保存融合前观测；成功前向后与融合状态共同写入缓存。
-            if self.history_fusion is not None and self.history_fusion.use_controlled_update:
+            if self.history_fusion is not None and self.history_fusion.requires_observation:
                 self._pending_observation = current_bev.detach()
             #* (11.12) 在原始缓存快照上执行历史→当前 BEV 对齐，不覆盖缓存中的原始 BEV。
             # process_history 接收对齐结果；像素有效掩码、逆向变换和网格存于临时结果中。
@@ -112,7 +112,7 @@ class StreamingBEVFusion(BEVFusion):
             return current_bev
         #*--------------------------------------------------------------#
         #* (11.17) 新路径：两份历史共用 warp 网格和槽位有效性。
-        if self.history_fusion.use_controlled_update:
+        if self.history_fusion.requires_observation:
             batch, _, nx, ny = current_bev.shape
             mask = torch.zeros((batch, nx, ny), device=current_bev.device, dtype=torch.bool)
             dt = torch.zeros(batch, device=current_bev.device, dtype=torch.float32)
@@ -122,7 +122,7 @@ class StreamingBEVFusion(BEVFusion):
             elif self._history_alignment is not None:
                 previous = self.bev_cache.observation
                 if previous is None or previous.shape != current_bev.shape or previous.device != current_bev.device:
-                    raise RuntimeError('Controlled update requires matching observation cache')
+                    raise RuntimeError('History guidance/update requires matching observation cache')
                 with torch.no_grad(), torch.cuda.amp.autocast(enabled=False):
                     observation = F.grid_sample(previous.float(), self._history_alignment['grid'],
                                                 mode='bilinear', padding_mode='zeros', align_corners=True)
@@ -131,6 +131,11 @@ class StreamingBEVFusion(BEVFusion):
                                    for cur, old, valid in zip(self._stream_metas, self.bev_cache.metas,
                                                               history_valid.tolist())],
                                   device=current_bev.device, dtype=torch.float32)
+            if self.history_fusion.mode == 'guided_refine' and history_valid is not None:
+                # Same slot fallback and detached replacement as original RefineNet;
+                # keep warp zero padding. Pixel validity only gates new guidance.
+                replacement = current_bev.detach() if self.training else current_bev
+                history_bev = torch.where(history_valid[:, None, None, None], history_bev, replacement)
             return self.history_fusion(current_bev, history_bev, observation, dt, mask)
         #*--------------------------------------------------------------#
         #* (11.12) 参照 StreamOcc：首帧用当前特征；无效历史槽位单独替换。

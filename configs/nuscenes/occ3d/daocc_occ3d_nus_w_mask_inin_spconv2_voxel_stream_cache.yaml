@@ -227,6 +227,10 @@ streaming:
   history_fusion:
     enabled: true
     #* (11.16) true：历史细化后拼接融合（默认）；false：直接拼接历史与当前特征并融合。
+    # mode=null preserves legacy flags; explicit mode takes precedence.
+    # Choices: identity, refine, controlled_update, guided_refine.
+    mode: null
+    guide_channels: 64
     use_refine: true
     #* (11.17) 开启后替代 RefineNet；use_refine 仅控制原路径。
     use_controlled_update: false

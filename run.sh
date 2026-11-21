@@ -1903,6 +1903,7 @@ CUDA_VISIBLE_DEVICES=6,7 torchrun \
   --optimizer.lr 2.0e-4 \
   --checkpoint_config.max_keep_ckpts 1
 
+#! 报NaN
 #* ROI 实例特征对照：旋转区域对齐后平均池化，不混入来源特征。
 # 无可学习偏移、采样权重或逐边匹配；其他流式训练设置保持一致。
 conda activate daocc-cu121
@@ -1947,7 +1948,53 @@ CUDA_VISIBLE_DEVICES=2,3 torchrun \
   --optimizer.lr 2.0e-4 \
   --checkpoint_config.max_keep_ckpts 1
 
+#* (11.20) 仅验证 local_edges 局部枚举建边的影响。
+# 保持原实例特征提取方式，不启用多点采样及权重聚合。
+# 对照：stream_pre_cbgs_faug_skip10_rev10_instance。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+
+CUDA_VISIBLE_DEVICES=2,3 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_stream_instance_bevfusion.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_pre_cbgs_faug_skip10_rev10_instance_2 \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --model.heads.object.multi_point_features False \
+  --model.heads.object.learnable_sampling False \
+  --model.heads.occ.instance_fusion.edge_matching False \
+  --model.heads.occ.instance_fusion.local_edges False \
+  --model.heads.object.roi_features False \
+  --streaming.history_fusion.mode refine \
+  --data.train.dataset.sequence_cbgs True \
+  --data.train.dataset.skip_empty_gt True \
+  --data.train.dataset.keep_consistent_seq_aug False \
+  --data.train.dataset.skip_prob 0.1 \
+  --data.train.dataset.sequence_flip_prob 0.1 \
+  --streaming.history_fusion.enabled True \
+  --streaming.bev_warp.enabled True \
+  --streaming.fuse_before_decoder True \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1 \
+  --resume_from /home/wangyushen/Data/Outputs/daocc/train/stream_pre_cbgs_faug_skip10_rev10_instance_2/iter_56272.pth \
+  --resume_from_EMA /home/wangyushen/Data/Outputs/daocc/train/stream_pre_cbgs_faug_skip10_rev10_instance_2/iter_56272_ema.pth
 
 #*---------------------------------------------#
 #* (11.17) 流式占据预测：可视化各阶段BEV特征图
@@ -2011,3 +2058,161 @@ CUDA_VISIBLE_DEVICES=2,3 torchrun \
   --log_config.interval 50 \
   --optimizer.lr 2.0e-4 \
   --checkpoint_config.max_keep_ckpts 1
+
+# (11.20) 可视化各阶段特征图：decoder 前以观测变化驱动的历史更新替代 RefineNet，保留 Cat 融合。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+CUDA_VISIBLE_DEVICES=0 python tools/visualize_streaming_bev_stages.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  /home/wangyushen/Data/Outputs/daocc/train/stream_pre_ctrl_cbgs_faug_skip10_rev10/latest.pth \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/outputs/stream_bev_stages_ctrl \
+  --steps 80 \
+  --workers 4 \
+  --precision fp16 \
+  --shared-scale \
+  --save-video \
+  --fps 2 \
+  --cfg-options \
+  streaming.history_fusion.enabled=True \
+  streaming.bev_warp.enabled=True \
+  streaming.fuse_before_decoder=True \
+  streaming.history_fusion.use_refine=True \
+  streaming.history_fusion.use_controlled_update=True \
+  streaming.history_fusion.update_scale=0.01 \
+  streaming.history_fusion.time_scale=1.0
+
+#* (11.20) decoder 前：原 RefineNet + 观测变化引导，保留 Cat 融合。
+# 当前观测、同阶段差分 ΔF、时间间隔 Δt 用于调制原注意力。
+# 引导输出零初始化；沿用原检测、占据监督。
+# 子序列 CBGS + 逐帧独立增强 + 0.1 跳帧/反序。
+# 2 卡，总 BS=8；训练 84,390 步，验证/保存间隔 3,517 步。
+# 对照：stream_pre_cbgs_faug_skip10_rev10。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+NUM_FRAMES=28130
+BATCH_SIZE=4
+NUM_WORKERS=4
+GPUS=2
+EPOCHS=24
+MAX_ITERS=$((NUM_FRAMES * EPOCHS / (BATCH_SIZE * GPUS)))
+INTERVAL=$(((MAX_ITERS + EPOCHS - 1) / EPOCHS))
+
+CUDA_VISIBLE_DEVICES=2,3 torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node="$GPUS" \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_stream_cache.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/stream_pre_guided_refine_g64_cbgs_faug_skip10_rev10 \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.train.dataset.sequence_cbgs True \
+  --data.train.dataset.skip_empty_gt True \
+  --data.train.dataset.keep_consistent_seq_aug False \
+  --data.train.dataset.skip_prob 0.1 \
+  --data.train.dataset.sequence_flip_prob 0.1 \
+  --streaming.history_fusion.enabled True \
+  --streaming.bev_warp.enabled True \
+  --streaming.fuse_before_decoder True \
+  --streaming.history_fusion.mode guided_refine \
+  --streaming.history_fusion.guide_channels 64 \
+  --streaming.history_fusion.time_scale 1.0 \
+  --data.samples_per_gpu "$BATCH_SIZE" \
+  --data.workers_per_gpu "$NUM_WORKERS" \
+  --runner.max_iters "$MAX_ITERS" \
+  --evaluation.interval "$INTERVAL" \
+  --checkpoint_config.interval "$INTERVAL" \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.max_keep_ckpts 1 \
+  --checkpoint_config.max_keep_ckpts 1 \
+  --resume_from /home/wangyushen/Data/Outputs/daocc/train/stream_pre_guided_refine_g64_cbgs_faug_skip10_rev10/iter_66823.pth \
+  --resume_from_EMA /home/wangyushen/Data/Outputs/daocc/train/stream_pre_guided_refine_g64_cbgs_faug_skip10_rev10/iter_66823_ema.pth
+
+#* ==========================================================
+#* (11.21) GaussianLSSTransform实现
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+mkdir -p /tmp/daocc_gaussian_include
+ln -sf /usr/include/crypt.h /tmp/daocc_gaussian_include/crypt.h
+
+CPATH=/tmp/daocc_gaussian_include \
+CUDA_HOME=/usr/local/cuda-12.2 \
+CC="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcc" \
+CXX="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++" \
+TORCH_CUDA_ARCH_LIST=8.6 MAX_JOBS=2 \
+python mmdet3d/ops/gaussian_rasterization/setup.py build_ext --inplace
+
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+cp build/lib.linux-x86_64-cpython-38/mmdet3d/ops/gaussian_rasterization/_C.cpython-38-x86_64-linux-gnu.so \
+   mmdet3d/ops/gaussian_rasterization/
+
+
+# 对比 BEVTransformV2 与 GaussianBEVTransform：
+# 1. 统计视角变换、完整相机分支、LiDAR分支及BEV融合的推理耗时；
+# 2. 统计整体模型、相机分支、视角变换、LiDAR分支及融合层的参数量和显存开销；
+# 3. 使用相同验证集样本，可视化相机BEV、原始LiDAR BEV和融合后BEV特征；
+# 4. 将可视化图片、逐样本测量结果及汇总报告保存到指定输出目录。
+# 未指定checkpoint时，两种模型均采用随机初始化，图片仅用于检查特征分布和空间对齐，
+# 不能用于比较训练后的语义表达能力或最终任务精度。
+
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=6 python tools/compare_gaussian_bev.py \
+  --output-dir /home/wangyushen/Data/Outputs/daocc/outputs/gaussian_bev_comparison \
+  --num-samples 10 \
+  --warmup 5 \
+  --repeat 20
+
+#* 单帧训练：BEVTransformV2 替换为 GaussianBEVTransform
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=6,7 \
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+PYTHONWARNINGS=ignore \
+python -m torch.distributed.run \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=2 \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_gaussian_bev_iter.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_gaussian_bev_iter_fp16_htc \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.samples_per_gpu 4 \
+  --data.workers_per_gpu 4 \
+  --max_epochs 6 \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.interval 3862 \
+  --evaluation.interval 3862 \
+  --max_keep_ckpt 1
+
+# 单帧、单卡训练：将BEVTransformV2替换为GaussianBEVTransform
+# 使用GPU 6；samples_per_gpu表示该单卡上的batch size。
+# --optimizer.lr 1.0e-4
+# --checkpoint_config.interval 7724 \
+# --evaluation.interval 7724
+
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=6 \
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+PYTHONWARNINGS=ignore \
+python tools/train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_gaussian_bev_iter.yaml \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_gaussian_bev_iter_fp16_htc_single_gpu \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --data.samples_per_gpu 8 \
+  --data.workers_per_gpu 4 \
+  --max_epochs 6 \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.interval 3862 \
+  --evaluation.interval 3862 \
+  --max_keep_ckpt 1
+

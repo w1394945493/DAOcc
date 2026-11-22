@@ -7,6 +7,8 @@ from mmcv import Config as MMCVConfig
 from mmdet3d.utils import recursive_eval
 from mmdet3d.models.builder import build_vtransform
 from mmdet3d.models.vtransforms.gaussian_bev.geometry import GaussianGeometry
+from mmdet3d.models.vtransforms.gaussian_bev.lidar_geometry import LidarGaussianGeometry
+from mmdet3d.models.vtransforms.gaussian_bev.predictor import PrepareLidarGaussianChannel
 from mmdet3d.models.vtransforms.gaussian_bev.renderer import GaussianBEVRenderer
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +23,32 @@ def load(path):
 
 
 class GaussianBEVTest(unittest.TestCase):
+    def test_learnable_lidar_geometry_initialization_and_bounds(self):
+        predictor = PrepareLidarGaussianChannel(
+            in_channels=[16], interm_c=16, out_c=8, learn_geometry=True)
+        geometry = LidarGaussianGeometry((4, 6))
+        for head in (predictor.offset, predictor.scale, predictor.rotation):
+            self.assertEqual(head.weight.abs().sum().item(), 0)
+
+        offset_logits = torch.zeros(2, 3)
+        scale_logits = predictor.scale.bias.detach().view(1, 3).expand(2, -1)
+        rotation_logits = torch.zeros(2, 4)
+        offset, scale, rotation = geometry.decode_geometry(
+            offset_logits, scale_logits, rotation_logits)
+        torch.testing.assert_close(offset, torch.zeros_like(offset))
+        torch.testing.assert_close(scale, torch.full_like(scale, .3))
+        torch.testing.assert_close(
+            rotation, torch.tensor([[1., 0., 0., 0.]]).expand(2, -1))
+        covariance = geometry.covariance_from_scale_rotation(scale, rotation)
+        torch.testing.assert_close(
+            covariance, torch.tensor([[.09, 0., 0., .09, 0., .09]]).expand(2, -1))
+
+        large = torch.full((1, 3), 100.)
+        offset, scale, _ = geometry.decode_geometry(
+            large, large, torch.zeros(1, 4))
+        torch.testing.assert_close(offset, torch.tensor([[.3, .3, .2]]))
+        torch.testing.assert_close(scale, torch.full((1, 3), .64))
+
     def test_configuration_only_changes_transform_and_fuser(self):
         old, new = load(BASE), load(NEW)
         self.assertEqual(new['model']['encoders']['camera']['vtransform']['type'], 'GaussianBEVTransform')
@@ -31,6 +59,13 @@ class GaussianBEVTest(unittest.TestCase):
         old['model']['fuser'].pop('in_channels')
         new['model']['fuser'].pop('in_channels')
         self.assertEqual(old, new)
+
+    def test_lidar_geometry_learning_is_disabled_by_default(self):
+        cfg = load(NEW)['model']['encoders']['camera']['vtransform']
+        self.assertFalse(cfg['learn_gaussian_geometry'])
+        model = build_vtransform(cfg)
+        self.assertFalse(model.learn_gaussian_geometry)
+        self.assertFalse(hasattr(model.predictor, 'geometry'))
 
     def test_geometry_with_image_and_lidar_augmentation(self):
         geo = GaussianGeometry((4, 6), (2, 3), 2, 1., 5., .5)
@@ -124,13 +159,14 @@ class GaussianBEVTest(unittest.TestCase):
         intr[:,:,0,0]=intr[:,:,1,1]=500
         intr[:,:,0,2]=352; intr[:,:,1,2]=128
         aug=torch.eye(4,device='cuda').unsqueeze(0)
+        points=[torch.tensor([[1.,1.,10.,0.,0.],[-1.,1.,8.,0.,0.]],device='cuda')]
         with torch.cuda.amp.autocast():
-            out=model(x,None,eye,aug,eye,eye,intr,eye,eye,aug,None)
+            out=model(x,points,eye,aug,eye,eye,intr,eye,eye,aug,None)
         self.assertEqual(tuple(out.shape),(1,128,180,180))
         self.assertTrue(torch.isfinite(out).all())
         out.square().mean().backward()
         self.assertTrue(torch.isfinite(x.grad).all())
-        for branch in (model.predictor.feats,model.predictor.depth,model.predictor.opacity):
+        for branch in (model.predictor.feats,model.predictor.opacity):
             g=branch[-1].weight.grad
             self.assertIsNotNone(g)
             self.assertTrue(torch.isfinite(g).all())
@@ -145,9 +181,10 @@ class GaussianBEVTest(unittest.TestCase):
         intr[:,:,0,0]=intr[:,:,1,1]=500
         intr[:,:,0,2]=352; intr[:,:,1,2]=128
         aug=torch.eye(4,device='cuda').unsqueeze(0)
+        points=[torch.tensor([[1.,1.,10.,0.,0.],[-1.,1.,8.,0.,0.]],device='cuda')]
         with torch.no_grad():
             images=torch.randn(1,6,3,256,704,device='cuda')
-            camera=model.extract_camera_features(images,None,eye,aug,eye,eye,intr,eye,eye,aug,[{}])
+            camera=model.extract_camera_features(images,points,eye,aug,eye,eye,intr,eye,eye,aug,[{}])
             self.assertEqual(tuple(camera.shape),(1,128,180,180))
             # LiDAR feature stub isolates new camera/fusion integration; sparse backbone unchanged.
             fused=model.fuser([camera,torch.zeros(1,256,180,180,device='cuda')])

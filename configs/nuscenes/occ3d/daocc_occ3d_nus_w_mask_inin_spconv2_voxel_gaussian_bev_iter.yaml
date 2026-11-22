@@ -104,8 +104,8 @@ model:
         #    直接使用输入点云中经过3D数据增强的LiDAR XYZ作为高斯中心，不预测深度分布。
         #    LiDAR点投影到各相机后按32x88图像特征格分组，每个相机特征格至多生成一个高斯；
         #    优先选当前帧最近点，没有当前帧点时再选历史sweep最近点。选中格直接提供
-        #    对应的图像feature和opacity；所有相机均不可见的点不生成相机高斯。
-        #    此模式仅使用gaussian_std设置固定协方差；下面的depth_num、depth_start、
+        #    对应图像格预测feature、opacity、中心修正、尺度和旋转；所有相机均不可见的点
+        #    不生成相机高斯。gaussian_std设置尺度初值；下面的depth_num、depth_start、
         #    depth_max和error_tolerance会被保留以方便切换，但不会参与计算。
         #
         # 2. center_source: depth
@@ -121,10 +121,9 @@ model:
         #   opacity：可学习。由图像opacity预测分支经sigmoid输出，用于高斯筛选和alpha合成。
         #
         # center_source=lidar（当前模式）：
-        #   中心mean：不可学习，直接取筛选后LiDAR点的增强坐标[X,Y,Z]。
-        #   尺度：不可学习，由gaussian_std预设，当前所有高斯均为[0.3,0.3,0.3]米。
-        #   协方差：不可学习，由gaussian_std平方得到固定对角矩阵diag(0.09,0.09,0.09)。
-        #   旋转：不预测；协方差与LiDAR坐标轴对齐。当前三个尺度相同，旋转也不会改变形状。
+        #   默认关闭几何学习：中心为选中LiDAR点，尺度固定为gaussian_std，
+        #   旋转固定为单位四元数[1,0,0,0]，不预测位置修正。
+        #   learn_gaussian_geometry=true时才学习中心修正、尺度和旋转。
         #   高斯数量/点选择：不可学习，由相机可见性、当前帧优先和最近深度规则离散确定。
         #
         # center_source=depth（原GaussianLSS模式）：
@@ -145,8 +144,17 @@ model:
         # center_source=depth时生效：缩放由深度概率分布计算得到的高斯协方差。
         error_tolerance: 0.5
 
-        # center_source=lidar时生效：LiDAR坐标系X/Y/Z方向的固定高斯标准差，单位为米。
+        # center_source=lidar时生效：X/Y/Z尺度初值，单位为米。
+        # 关闭几何学习时始终作为固定尺度；开启时作为尺度初值。
         gaussian_std: [0.3, 0.3, 0.3]
+        # 默认false，保持固定尺度、单位旋转和零位置修正，也不创建几何预测头。
+        learn_gaussian_geometry: false
+        # 以下三项仅在learn_gaussian_geometry=true时生效。
+        # 尺度logits经sigmoid后，在对数空间映射到以下范围，单位为米。
+        gaussian_scale_min: [0.08, 0.08, 0.08]
+        gaussian_scale_max: [0.64, 0.64, 0.64]
+        # 中心修正logits经tanh后的XYZ最大绝对偏移，单位为米。
+        center_offset_limit: [0.3, 0.3, 0.2]
         # center_source=lidar时生效：点特征第5维（索引4）是相对当前关键帧的时间差。
         # 每个相机特征格最多保留一个点；优先当前帧时间差为0的点并选择最近深度，
         # 当前帧没有投影点时才从历史sweep点中选择最近深度。
@@ -155,7 +163,7 @@ model:
 
         # 两种模式均生效：光栅化前过滤opacity不大于该阈值的高斯。
         opacity_filter: 0.01
-        # 两种模式均生效：图像feature与opacity预测分支的中间通道数。
+        # 两种模式均生效：图像预测分支的中间通道数；LiDAR模式新增几何分支也使用该值。
         interm_channels: 256
   fuser:
     type: ConvFuser

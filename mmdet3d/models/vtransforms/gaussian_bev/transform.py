@@ -16,6 +16,10 @@ class GaussianBEVTransform(BaseModule):
                  depth_num=64, depth_start=1., depth_max=61.,
                  error_tolerance=.5, opacity_filter=.01, interm_channels=256,
                  center_source="depth", gaussian_std=(0.3, 0.3, 0.3),
+                 gaussian_scale_min=(0.08, 0.08, 0.08),
+                 gaussian_scale_max=(0.64, 0.64, 0.64),
+                 center_offset_limit=(0.3, 0.3, 0.2),
+                 learn_gaussian_geometry=False,
                  lidar_time_dimension=4, current_time_epsilon=1e-6):
         super().__init__()
         self.in_channels = in_channels
@@ -24,6 +28,7 @@ class GaussianBEVTransform(BaseModule):
         if center_source not in ("depth", "lidar"):
             raise ValueError("center_source must be 'depth' or 'lidar'")
         self.center_source = center_source
+        self.learn_gaussian_geometry = learn_gaussian_geometry
         if center_source == "depth":
             self.predictor = PrepareChannel(in_channels=[in_channels],
                                             interm_c=interm_channels,
@@ -33,10 +38,13 @@ class GaussianBEVTransform(BaseModule):
         else:
             self.predictor = PrepareLidarGaussianChannel(
                 in_channels=[in_channels], interm_c=interm_channels,
-                out_c=out_channels)
+                out_c=out_channels, initial_scale=gaussian_std,
+                scale_min=gaussian_scale_min, scale_max=gaussian_scale_max,
+                learn_geometry=learn_gaussian_geometry)
             self.geometry = LidarGaussianGeometry(
-                image_size, gaussian_std, lidar_time_dimension,
-                current_time_epsilon)
+                image_size, gaussian_std, gaussian_scale_min,
+                gaussian_scale_max, center_offset_limit,
+                lidar_time_dimension, current_time_epsilon)
         self.renderer = GaussianBEVRenderer(xbound, ybound, out_channels, opacity_filter)
         self.fp16_enabled = False
 
@@ -58,10 +66,18 @@ class GaussianBEVTransform(BaseModule):
                 features = features.reshape(b, n, self.out_channels, h, w).permute(0,1,3,4,2).reshape(b,-1,self.out_channels)
                 opacity = opacity.reshape(b,n,1,h,w).permute(0,1,3,4,2).reshape(b,-1,1)
             else:
-                features, opacity = self.predictor(flat)
+                prediction = self.predictor(flat)
+                features, opacity = prediction[:2]
                 features = features.reshape(b, n, self.out_channels, h, w)
                 opacity = opacity.reshape(b, n, 1, h, w)
+                geometry_kwargs = {}
+                if self.learn_gaussian_geometry:
+                    geometry_kwargs = dict(
+                        image_offsets=prediction[2].reshape(b, n, 3, h, w),
+                        image_scales=prediction[3].reshape(b, n, 3, h, w),
+                        image_rotations=prediction[4].reshape(b, n, 4, h, w))
                 features, means, cov, opacity = self.geometry(
                     features, opacity, points, lidar2image.float(),
-                    img_aug_matrix.float(), lidar_aug_matrix.float())
+                    img_aug_matrix.float(), lidar_aug_matrix.float(),
+                    **geometry_kwargs)
             return self.renderer(features, means, cov, opacity)

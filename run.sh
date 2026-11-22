@@ -2226,3 +2226,73 @@ python tools/train.py \
   --evaluation.interval 7724 \
   --max_keep_ckpt 1
 
+#*--------------------------------------------------------------------#
+#* (11.22) 单帧训练：GaussianBEVTransform，学习高斯尺度、旋转和位置修正
+# 高斯中心以投影到图像特征格的 LiDAR 点为初始位置；每个特征格最多保留一个点，
+# 优先选择当前帧最近点，当前帧无点时选择历史 sweep 最近点。
+# 在固定几何版本的基础上开启 learn_gaussian_geometry：
+#   1. 尺度：以 0.3 m 初始化，并学习至 0.08～0.64 m 范围；
+#   2. 旋转：以单位四元数 [1, 0, 0, 0] 初始化，并预测归一化四元数；
+#   3. 位置：以零修正初始化，XYZ 修正范围分别限制在 ±0.3、±0.3、±0.2 m。
+# 其余数据、训练轮数、batch size 和学习率保持一致，用于与固定几何版本进行对照。
+
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=2,3 \
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+PYTHONWARNINGS=ignore \
+python -m torch.distributed.run \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=2 \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_inin_spconv2_voxel_gaussian_bev_iter.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_gaussian_bev_learn_geometry_iter_fp16_htc \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --model.encoders.camera.vtransform.learn_gaussian_geometry true \
+  --data.samples_per_gpu 4 \
+  --data.workers_per_gpu 4 \
+  --max_epochs 6 \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.interval 3862 \
+  --evaluation.interval 3862 \
+  --max_keep_ckpt 1
+
+#*========================================================
+#* (11.22) 可视化
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+/home/wangyushen/.local/opt/xvfb/usr/bin/xvfb-run -a \
+python tools/visualize_occ_detection_video.py \
+  --gpu 0 \
+  --workers 0 \
+  --render-interior \
+  --scenes scene-0003 \
+  --fps 2 \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/visualization/occ_detection_video
+
+#* 统计：占据精确率，召回率指标（二值指标）
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+python tools/evaluate_binary_occupancy.py \
+  --gpu 0 \
+  --workers 2 \
+  --mask camera \
+  --out /home/wangyushen/Data/Outputs/daocc/binary_occupancy_metrics.json
+
+#* 
+
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD \
+/home/wangyushen/.local/opt/xvfb/usr/bin/xvfb-run -a \
+python tools/export_single_frame_ppt_assets.py \
+  --gpu 0 \
+  --workers 0 \
+  --index 100 \
+  --out-dir /home/wangyushen/Data/Outputs/daocc/visualization/assets

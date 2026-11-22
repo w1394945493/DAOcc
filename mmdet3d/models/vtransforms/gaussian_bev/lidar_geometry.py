@@ -6,22 +6,57 @@ from torch.nn import functional as F
 
 class LidarGaussianGeometry(nn.Module):
     def __init__(self, image_size, gaussian_std=(0.3, 0.3, 0.3),
+                 scale_min=(0.08, 0.08, 0.08),
+                 scale_max=(0.64, 0.64, 0.64),
+                 offset_limit=(0.3, 0.3, 0.2),
                  time_dimension=4, current_time_epsilon=1e-6):
         super().__init__()
         if len(gaussian_std) != 3 or any(v <= 0 for v in gaussian_std):
             raise ValueError("gaussian_std must contain three positive values")
+        if (len(scale_min) != 3 or len(scale_max) != 3 or
+                any(lo <= 0 or hi <= lo for lo, hi in zip(scale_min, scale_max))):
+            raise ValueError("scale_min/scale_max must contain three valid bounds")
+        if len(offset_limit) != 3 or any(v <= 0 for v in offset_limit):
+            raise ValueError("offset_limit must contain three positive values")
         self.image_size = tuple(image_size)
         self.time_dimension = time_dimension
         self.current_time_epsilon = current_time_epsilon
-        variance = torch.as_tensor(gaussian_std, dtype=torch.float32).square()
-        # Upper-triangular order consumed by the Gaussian rasterizer.
-        covariance = torch.stack((variance[0], variance.new_zeros(()),
-                                  variance.new_zeros(()), variance[1],
-                                  variance.new_zeros(()), variance[2]))
-        self.register_buffer("covariance", covariance, persistent=False)
+        self.register_buffer("fixed_scale", torch.as_tensor(
+            gaussian_std, dtype=torch.float32), persistent=False)
+        self.register_buffer("scale_min", torch.as_tensor(
+            scale_min, dtype=torch.float32), persistent=False)
+        self.register_buffer("scale_max", torch.as_tensor(
+            scale_max, dtype=torch.float32), persistent=False)
+        self.register_buffer("offset_limit", torch.as_tensor(
+            offset_limit, dtype=torch.float32), persistent=False)
+
+    def decode_geometry(self, offset_logits, scale_logits, rotation_logits):
+        """Convert raw logits to metric offsets/scales and unit quaternions."""
+        offset = torch.tanh(offset_logits) * self.offset_limit.to(offset_logits)
+        log_min = self.scale_min.to(scale_logits).log()
+        log_max = self.scale_max.to(scale_logits).log()
+        scale = torch.exp(log_min + torch.sigmoid(scale_logits) * (log_max - log_min))
+        identity = rotation_logits.new_tensor((1., 0., 0., 0.))
+        rotation = F.normalize(rotation_logits + identity, dim=-1)
+        return offset, scale, rotation
+
+    @staticmethod
+    def covariance_from_scale_rotation(scale, quaternion):
+        """Return covariance in CUDA upper-triangular order [xx,xy,xz,yy,yz,zz]."""
+        w, x, y, z = quaternion.unbind(-1)
+        rotation = torch.stack((
+            1 - 2 * (y*y + z*z), 2 * (x*y - w*z), 2 * (x*z + w*y),
+            2 * (x*y + w*z), 1 - 2 * (x*x + z*z), 2 * (y*z - w*x),
+            2 * (x*z - w*y), 2 * (y*z + w*x), 1 - 2 * (x*x + y*y),
+        ), dim=-1).reshape(*quaternion.shape[:-1], 3, 3)
+        # Scale the columns of R: covariance = R diag(scale^2) R^T.
+        scaled_rotation = rotation * scale.square().unsqueeze(-2)
+        covariance = scaled_rotation @ rotation.transpose(-1, -2)
+        return covariance.flatten(-2)[..., [0, 1, 2, 4, 5, 8]]
 
     def forward(self, image_features, image_opacity, points, lidar2image,
-                img_aug_matrix, lidar_aug_matrix):
+                img_aug_matrix, lidar_aug_matrix, image_offsets=None,
+                image_scales=None, image_rotations=None):
         """Return padded per-point Gaussian tensors for a batch."""
         _, num_cameras, channels = image_features.shape[:3]
         # points是长度为B的Python列表，而不是[B,P,C]定长张量；其中第b项形状为
@@ -64,7 +99,16 @@ class LidarGaussianGeometry(nn.Module):
                     num_cameras, feature_count, channels)
                 opacity_maps = image_opacity[batch_index].permute(0, 2, 3, 1).reshape(
                     num_cameras, feature_count, 1)
+                learn_geometry = image_offsets is not None
+                if learn_geometry:
+                    offset_maps = image_offsets[batch_index].permute(0, 2, 3, 1).reshape(
+                        num_cameras, feature_count, 3)
+                    scale_maps = image_scales[batch_index].permute(0, 2, 3, 1).reshape(
+                        num_cameras, feature_count, 3)
+                    rotation_maps = image_rotations[batch_index].permute(0, 2, 3, 1).reshape(
+                        num_cameras, feature_count, 4)
                 selected_features, selected_means, selected_opacity = [], [], []
+                selected_offsets, selected_scales, selected_rotations = [], [], []
 
                 # 每个相机特征格至多选择一个LiDAR点：若该格存在当前帧点，只在
                 # 当前帧点中选择相机深度最近者；否则从历史sweep点中选择最近者。
@@ -103,17 +147,32 @@ class LidarGaussianGeometry(nn.Module):
                     selected_features.append(feature_maps[camera_index, occupied_cells])
                     selected_opacity.append(opacity_maps[camera_index, occupied_cells])
                     selected_means.append(xyz_aug[chosen_points])
+                    if learn_geometry:
+                        selected_offsets.append(offset_maps[camera_index, occupied_cells])
+                        selected_scales.append(scale_maps[camera_index, occupied_cells])
+                        selected_rotations.append(rotation_maps[camera_index, occupied_cells])
 
                 if selected_means:
                     feat = torch.cat(selected_features, dim=0)
                     alpha = torch.cat(selected_opacity, dim=0)
                     xyz_aug = torch.cat(selected_means, dim=0)
+                    if learn_geometry:
+                        offset_logits = torch.cat(selected_offsets, dim=0)
+                        scale_logits = torch.cat(selected_scales, dim=0)
+                        rotation_logits = torch.cat(selected_rotations, dim=0)
+                        offset, scale, rotation = self.decode_geometry(
+                            offset_logits, scale_logits, rotation_logits)
+                        xyz_aug = xyz_aug + offset
+                    else:
+                        scale = self.fixed_scale.to(xyz_aug).expand(xyz_aug.shape[0], -1)
+                        rotation = xyz_aug.new_zeros(xyz_aug.shape[0], 4)
+                        rotation[:, 0] = 1
+                    covariance = self.covariance_from_scale_rotation(scale, rotation)
                 else:
                     feat = image_features.new_empty(0, channels)
                     alpha = image_opacity.new_empty(0, 1)
                     xyz_aug = xyz_aug.new_empty(0, 3)
-                count = xyz_aug.shape[0]
-                covariance = self.covariance.to(xyz_aug).expand(count, -1)
+                    covariance = xyz_aug.new_empty(0, 6)
             else:
                 feat = image_features.new_empty(0, channels)
                 alpha = image_opacity.new_empty(0, 1)

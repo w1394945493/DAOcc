@@ -96,8 +96,12 @@ centres. Points are projected through lidar2image and img_aug_matrix and grouped
 by camera feature cell. Each cell emits at most one Gaussian: a current-frame
 point (time lag zero) is preferred and the nearest camera depth is selected;
 only cells without a current-frame point fall back to the nearest historical
-sweep point. The selected cell supplies its image feature and opacity. Points
-unseen by every camera do not contribute to the camera BEV. gaussian_std
-specifies the fixed XYZ standard deviation in metres; the current configuration
-uses [0.3, 0.3, 0.3]. center_source: depth retains the original GaussianLSS
-depth-distribution implementation.
+sweep point. The selected cell supplies its image feature and opacity. Points unseen
+by every camera do not contribute to the camera BEV. By default,
+learn_gaussian_geometry is false: no geometry head is created, centres are the selected
+LiDAR points, scales stay fixed at gaussian_std and rotations stay at the identity
+quaternion. When enabled, the geometry head predicts bounded XYZ centre offsets, XYZ
+scales and a unit quaternion. Scales are log-space mapped to [0.08, 0.64] m; offsets
+are bounded to +/-[0.3, 0.3, 0.2] m. Zero-initialized output weights start from zero offset,
+[0.3, 0.3, 0.3] m scale and identity quaternion [1, 0, 0, 0]. center_source:
+depth retains the original GaussianLSS depth-distribution implementation.

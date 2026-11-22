@@ -2131,8 +2131,9 @@ CUDA_VISIBLE_DEVICES=2,3 torchrun \
   --resume_from /home/wangyushen/Data/Outputs/daocc/train/stream_pre_guided_refine_g64_cbgs_faug_skip10_rev10/iter_66823.pth \
   --resume_from_EMA /home/wangyushen/Data/Outputs/daocc/train/stream_pre_guided_refine_g64_cbgs_faug_skip10_rev10/iter_66823_ema.pth
 
-#* ==========================================================
+#* =================================================================================================
 #* (11.21) GaussianLSSTransform实现
+#* 编译高斯光栅化源码
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 
@@ -2147,7 +2148,6 @@ TORCH_CUDA_ARCH_LIST=8.6 MAX_JOBS=2 \
 python mmdet3d/ops/gaussian_rasterization/setup.py build_ext --inplace
 
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
-
 cp build/lib.linux-x86_64-cpython-38/mmdet3d/ops/gaussian_rasterization/_C.cpython-38-x86_64-linux-gnu.so \
    mmdet3d/ops/gaussian_rasterization/
 
@@ -2163,7 +2163,11 @@ cp build/lib.linux-x86_64-cpython-38/mmdet3d/ops/gaussian_rasterization/_C.cpyth
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 CUDA_VISIBLE_DEVICES=6 python tools/compare_gaussian_bev.py \
-  --output-dir /home/wangyushen/Data/Outputs/daocc/outputs/gaussian_bev_comparison \
+  --output-dir /home/wangyushen/Data/Outputs/daocc/outputs/gaussian_bev_comparison_2 \
+  --baseline-checkpoint /home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_iter_fp16_htc/latest.pth \
+  --gaussian-checkpoint /home/wangyushen/Data/Outputs/daocc/train/daocc/w_mask/train_spconv2_voxel_gaussian_bev_iter_fp16_htc/latest.pth \
+  --skip-performance \
+  --start-index 100 \
   --num-samples 10 \
   --warmup 5 \
   --repeat 20
@@ -2204,7 +2208,6 @@ python -m torch.distributed.run \
   # --data.workers_per_gpu 4 \
   # --checkpoint_config.interval 7724 \
   # --evaluation.interval 7724 \
-
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
 CUDA_VISIBLE_DEVICES=6 \

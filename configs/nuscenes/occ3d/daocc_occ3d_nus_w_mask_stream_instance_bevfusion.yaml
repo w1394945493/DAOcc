@@ -115,15 +115,24 @@ model:
     object:
       type: ProposalHead
       #* (11.19) ROI 模式优先；开启后不创建多点偏移/权重网络，原配置行为默认保留。
-      roi_features: false
+      roi_features: false #! 未见有效；或混合精度训练报nan
       roi_output_size: 3  # 每个框对齐为 3×3 区域特征，再空间平均。
       roi_sampling_ratio: 2  # 每区域 2×2 个插值点，共36点，无新增可学习参数。
       #* (11.19) 仅以框内采样特征自适应聚合；multi_point_features=false 恢复单点。
-      multi_point_features: true
-      learnable_sampling: true  # false：固定五点；true：由实例特征预测框内偏移。
+      multi_point_features: false
+      learnable_sampling: false  # false：固定五点；true：由实例特征预测框内偏移。
       sampling_points: 5  # 可学习采样点数 K；来源网格仅预测偏移和权重，不混入实例特征。
       instance_selection:
         score_threshold: 0.3
+        #* (11.23) 新增可选训练期GT质量筛选，默认关闭以保持原实验行为。
+        # 默认 score_only 保持原筛选；改为 gt_quality 后仅在训练时进一步要求：
+        # 同类别GT的 box_cost < 1.5 或 3D IoU > 0.3。推理始终保持原筛选。
+        train_filter: score_only
+        #* (11.23) false仅取消训练实例分数门槛；检测阈值/NMS/GT筛选仍生效，推理不变。
+        train_score_filter: true
+        box_cost_threshold: 1.5
+        iou_threshold: 0.3
+        class_aware: true
       in_channels: 512
       train_cfg:
         point_cloud_range: ${point_cloud_range}
@@ -188,8 +197,14 @@ model:
       instance_fusion:
         type: BoxBEVFusion
         #* (11.19) 聚合前逐边匹配；局部枚举仍保留旋转框精确检查。
-        edge_matching: true
-        local_edges: true
+        edge_matching: false #! 未见有效
+        local_edges: false
+        #* (11.23) 实例消息聚合方式：weighted_mean 保持原实现，按检测分数及 edge_matching
+        # 输出的匹配程度加权平均同一 OCC 单元收到的多条实例消息。
+        aggregation: weighted_mean #! 若需由 OCC 特征主动选择实例，将上一项改为 attention。
+        # attention 使用 OCC 特征作 Query、实例消息作 Key，并把检测分数作为注意力先验；
+        # softmax 仅在同一个 OCC 单元关联的实例之间计算。
+        attention_channels: 32  # 仅 aggregation=attention 时创建并使用，越大计算量越高
         instance_channels: 64
         bev_channels: 128
         num_classes: 10

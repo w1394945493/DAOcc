@@ -9,12 +9,18 @@ from mmdet3d.models.builder import CUSTOMS
 class BoxBEVFusion(nn.Module):
     def __init__(self, instance_channels=64, bev_channels=128, num_classes=10,
                  max_instances=100, gate_init=0.01,
-                 edge_matching=False, local_edges=False):
+                 edge_matching=False, local_edges=False,
+                 aggregation='weighted_mean', attention_channels=32):
         super().__init__()
         if max_instances < 1 or not 0 < gate_init < 1:
             raise ValueError('max_instances须为正，gate_init须在(0,1)内')
+        if aggregation not in ('weighted_mean', 'attention'):
+            raise ValueError("aggregation须为'weighted_mean'或'attention'")
+        if not isinstance(attention_channels, int) or attention_channels < 1:
+            raise ValueError('attention_channels须为正整数')
         self.max_instances = max_instances
         self.bev_channels = bev_channels
+        self.aggregation = aggregation
         #* (11.19) 独立开关：旧配置不改变；新配置显式开启逐边匹配和局部枚举。
         self.local_edges = local_edges
         self.edge_match = None
@@ -32,6 +38,16 @@ class BoxBEVFusion(nn.Module):
         # 局部归一化 XY(2)、中心高度(1)、log尺寸(3)、sin/cos(2)、置信度(1)。
         self.geometry = nn.Sequential(nn.Linear(9, bev_channels), nn.ReLU(), nn.Linear(bev_channels, bev_channels))
         self.message = nn.Sequential(nn.LayerNorm(bev_channels), nn.ReLU(), nn.Linear(bev_channels, bev_channels))
+        # 可选轻量单头注意力：占据特征生成 Query，逐边实例消息生成 Key。
+        # 默认 weighted_mean 不创建这两个投影，保持原参数量、初始化和计算路径不变。
+        if aggregation == 'attention':
+            self.attention_query = nn.Linear(bev_channels, attention_channels, bias=False)
+            self.attention_key = nn.Linear(bev_channels, attention_channels, bias=False)
+            self.attention_scale = attention_channels ** -0.5
+        else:
+            self.attention_query = None
+            self.attention_key = None
+            self.attention_scale = None
         self.gate = nn.Linear(bev_channels * 2, bev_channels)
         nn.init.zeros_(self.gate.weight)
         nn.init.constant_(self.gate.bias, math.log(gate_init / (1 - gate_init)))
@@ -145,11 +161,17 @@ class BoxBEVFusion(nn.Module):
         src = order[rank]
         # nonzero 按行输出，与原来的“逐框、逐网格”边顺序一致。
         box = boxes[src]
+        # 每条边对应一对“预测框 src -> OCC 网格 dst”。同一个框可对应多个 dst，
+        # 因而下面的 delta 会为该框覆盖的每个 OCC 网格分别计算相对位置。
         delta = points[dst, :2] - box[:, :2]
         c, sn = box[:, 6].cos(), box[:, 6].sin()
-        local = torch.stack([c * delta[:, 0] + sn * delta[:, 1],
-                             -sn * delta[:, 0] + c * delta[:, 1]], dim=-1)
+        # 将“网格相对框中心的 XY 偏移”旋转到框自身的局部坐标系。
+        #! 即使 src 相同，只要 dst 不同，delta 和 local 就不同；这正是框与网格的几何关系。
+        local = torch.stack([c * delta[:, 0] + sn * delta[:, 1], -sn * delta[:, 0] + c * delta[:, 1]], dim=-1)
+        # 用框的长宽归一化，得到框内相对位置 local_xy；通常框中心附近约为 (0, 0)，
+        # 框边缘附近约为 +/-0.5。它不只是框自身的几何属性。
         xy = local / box[:, 3:5].clamp_min(1e-3)
+        #! 同一个框覆盖的不同 OCC 网格具有不同的 xy，因此 geo 不同，后续会生成不同的几何消息。
         geo = torch.cat([xy, box[:, 2:3] / 10, box[:, 3:6].clamp_min(1e-3).log(),
                          sn[:, None], c[:, None], scores[src, None]], dim=-1)
         return src, dst, geo
@@ -195,8 +217,11 @@ class BoxBEVFusion(nn.Module):
         rows = low[rank, 1] + offset // sizes[rank, 0].clamp_min(1)
         dst = rows * width + cols
         box = boxes_sorted[rank]
+        # rank 标识候选框，dst 标识该框覆盖的具体 OCC 网格；一个 rank 通常对应多个 dst。
         delta = points[dst, :2] - box[:, :2]
         c, sn = box[:, 6].cos(), box[:, 6].sin()
+        # 将每个 OCC 网格相对框中心的偏移旋转到对应框的局部坐标系。
+        #! 同一框内不同网格的 dst 不同，所以这里得到的 xy 也不同。
         xy = torch.stack([c * delta[:, 0] + sn * delta[:, 1],
                           -sn * delta[:, 0] + c * delta[:, 1]], -1)
         xmin, ymin, xmax, ymax = source_bounds
@@ -211,6 +236,9 @@ class BoxBEVFusion(nn.Module):
         rank, dst, xy = rank[keep], dst[keep], xy[keep]
         src = order[rank]
         box = boxes[src]
+        # 前两维是归一化 local_xy，描述“框 -> 当前 OCC 网格”的相对几何；
+        # 后七维描述框的高度、尺寸、朝向和置信度。
+        #! local_xy 随 dst 变化，使同一实例发往不同 OCC 网格的 geo 和几何消息各不相同。
         geo = torch.cat([xy / box[:, 3:5].clamp_min(1e-3), box[:, 2:3] / 10,
                          box[:, 3:6].clamp_min(1e-3).log(), box[:, 6:7].sin(),
                          box[:, 6:7].cos(), scores[src, None]], -1)
@@ -229,6 +257,7 @@ class BoxBEVFusion(nn.Module):
             # 每个参数 Tensor 取一个元素乘0，构造数值为0、但依赖全部融合参数的标量。
             # 下方将它加到输出后，反向会为这些参数产生零梯度，而非将其视作 unused parameter，
             # 避免本模块的空候选分支触发 DDP(find_unused_parameters=False) 的未使用参数问题。
+            #! (11.23) 即使整个 batch 没有选中任何预测框，多卡训练也不会因融合参数未使用而报错。
             # 这里只补计算图依赖；有有效边时，正常融合路径仍可贡献非零梯度。
             zero = sum(p.reshape(-1)[0] * 0 for p in self.parameters())
             for b in range(bsz):
@@ -237,6 +266,8 @@ class BoxBEVFusion(nn.Module):
                 #*-----------------------------------------------------------------------------#
                 # 构建边邻接关系：points[b]：第 b 个样本中，每个占据 BEV 单元对应的空间查询点坐标，
                 src, dst, geo = self.build_edges(points[b].detach().float(), item, source_bounds, (height, width))
+                #! 空实例或实例未覆盖有效 OCC 网格时 src 为空，下面的实例消息、聚合和门控全部跳过；
+                #! flat 保持原 OCC 特征，仍会继续进入占据预测头并正常计算 OCC loss。
                 # D1. 每次只处理本样本的局部索引，无跨batch连接；flat为[Yocc*Xocc,C]。
                 if src.numel():
                     #*-------------------------------------------------------------------------#
@@ -245,9 +276,15 @@ class BoxBEVFusion(nn.Module):
                     # content[src]把同一实例复制到它的各条边，再加每条边的几何编码形成消息。
                     content = self.content(item['features'].float()) + self.category(item['labels'])
                     # 消息仍编码实例与相对几何；新增匹配分支在聚合之前参考目标单元。
+                    # content[src] 对同一个框相同，但 geo 中的 local_xy 随目标网格 dst 改变。
+                    #! 因此同一个框覆盖的不同 OCC 网格会得到不同的 geometry(geo)，
+                    #! 最终生成不同的 messages，而不是把同一个实例向量原样广播到整个框内。
                     messages = self.message(content[src] + self.geometry(geo)) # 消息包含：检测来源网格提取的实例特征；检测类别 embedding；实例与目标单元之间的几何信息。
-                    weights = item['scores'].detach().float()[src].clamp(0, 1)[:, None]
+                    score_prior = item['scores'].detach().float()[src].clamp(0, 1)[:, None]
+
+                    #*--------------------------------------------------------------------------#
                     #* (11.19) 每条边联合实例、目标占据单元和几何，学习接收程度。
+                    #! 不可行：实例框过大时，可能关联多个目标占据单元，导致计算开销显著增加
                     # 检测分数作为先验；sigmoid 不强迫所有实例权重和为1，允许都不接收。
                     # 后续保留原归一化与总权重幅度控制，避免单边时匹配权重被完全抵消。
                     if self.edge_match is not None:
@@ -257,7 +294,7 @@ class BoxBEVFusion(nn.Module):
                         # 相对几何 geo[i,j]       [9]    相对位置、框尺寸、朝向等
                         # 同一个实例连接不同单元时，目标特征和相对位置不同，匹配权重也可以不同。
                         match = self.edge_match(torch.cat([content[src], flat[dst], geo], -1)).sigmoid()
-                        weights = weights * match
+                        score_prior = score_prior * match
                     # D3. index_add按dst将消息汇入目标BEV；重叠实例按置信度归一化，
                     # 避免仅因连接数量更多导致消息幅值线性增大。未关联单元total=denom=0。
                     #* (11.16) 优化前全网格聚合/门控实现保留如下（仅注释，不执行）。
@@ -279,11 +316,50 @@ class BoxBEVFusion(nn.Module):
                     #* (11.16) 只在实际关联单元上聚合和计算门控，再散射回原网格。
                     # 无边位置原更新严格为0，无需执行128通道门控 Linear。
                     active, inverse = torch.unique(dst, sorted=True, return_inverse=True)
+                    if self.aggregation == 'attention':
+                        # src[e]、dst[e] 描述第 e 条“实例 -> OCC 单元”边：
+                        # messages[e] 是这条边携带的实例消息，flat[dst[e]] 是接收它的 OCC 特征。
+                        # 如果两个实例都覆盖同一个 OCC 单元，它们的 dst 相同，但 messages 不同。
+
+                        # 每条边都用目标 OCC 特征生成 Query，用该边的实例消息生成 Key。
+                        # flat[dst] 会按照边表重复取 OCC 特征，因此 query/key 均为 [边数 E, A]；
+                        # A=attention_channels。相同目标 OCC 的 Query 相同，不同实例的 Key 不同。
+                        query = self.attention_query(flat[dst])
+                        key = self.attention_key(messages)
+
+                        # 点积衡量“这个 OCC 单元与这个实例消息是否匹配”。除以 sqrt(A)
+                        # 控制维度增大时点积幅度，得到每条边一个标量 logits[e]。
+                        logits = (query * key).sum(-1, keepdim=True) * self.attention_scale
+
+                        # 检测分数作为注意力先验：logits + log(score) 等价于
+                        # exp(logits) * score。高分实例更容易获得较大权重，但 OCC/实例
+                        # 特征的匹配仍可改变实例之间的排序。clamp_min 防止 log(0)。
+                        logits = logits + score_prior.clamp_min(1e-6).log()
+
+                        # 这里只计算 softmax 的分子 exp(logits)。真正的分母在下方通过
+                        # index_add 按 inverse 分组求和：同一 dst 的所有实例共用一个分母。
+                        # 最终 averaged = sum(exp(logit_e)*message_e) / sum(exp(logit_e))，
+                        # 即在“同一个 OCC 单元关联的实例”之间进行单头 softmax 聚合。
+                        # clamp 仅限制极端 logits，避免 exp 溢出。
+                        weights = logits.clamp(-20, 20).exp()
+                    else:
+                        # 原默认路径：仅按检测分数（及可选 edge_match）加权平均。
+                        weights = score_prior
+                    # inverse[e] 表示第 e 条边属于 active 中的哪个 OCC 单元。
+                    # 因此 index_add 会分别计算每个 OCC 单元的加权消息和权重分母。
                     total = flat.new_zeros((len(active), channels)).index_add(0, inverse, messages * weights)
                     denom = flat.new_zeros((len(active), 1)).index_add(0, inverse, weights)
                     averaged = total / denom.clamp_min(1e-6)
                     gate = torch.sigmoid(self.gate(torch.cat([flat[active], averaged], -1)))
-                    update = gate * averaged * denom.clamp(max=1)
+                    if self.aggregation == 'attention':
+                        # 注意力 softmax 负责实例间分配；注意力加权置信度负责整体注入强度。
+                        # 相同实例重复出现时，聚合消息和强度都保持不变。
+                        confidence = flat.new_zeros((len(active), 1)).index_add(
+                            0, inverse, weights * score_prior) / denom.clamp_min(1e-6)
+                    else:
+                        # 保持原加权平均路径的总置信度幅度控制。
+                        confidence = denom.clamp(max=1)
+                    update = gate * averaged * confidence
                     flat = flat.index_add(0, active, update)
                 # zero 将上面的参数依赖真正接到输出/loss；两项均为0，不改变当前 BEV 数值。
                 # features.sum()*0 同时保留“实例特征→来源 gather→检测特征”的反向路径：

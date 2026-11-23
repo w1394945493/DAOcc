@@ -56,8 +56,23 @@ class ProposalHead(CenterHead):
             torch.nn.init.zeros_(self.sample_weight_predictor[-1].bias)
         selection = dict(instance_selection or {})
         self.instance_score_threshold = float(selection.pop('score_threshold', 0.3))
-        if selection or not 0 <= self.instance_score_threshold <= 1:
-            raise ValueError('instance_selection 仅支持 [0,1] 范围的 score_threshold')
+        #* (11.23) 可选关闭训练实例分数门槛；默认开启，推理始终保留门槛。
+        self.instance_train_score_filter = selection.pop('train_score_filter', True)
+        if not isinstance(self.instance_train_score_filter, bool):
+            raise ValueError('train_score_filter须为布尔值')
+        #* (11.23) 新增可选训练期GT质量筛选；默认score_only保持原训练/推理行为。
+        self.instance_train_filter = selection.pop('train_filter', 'score_only')
+        self.instance_box_cost_threshold = float(selection.pop('box_cost_threshold', 1.5))
+        self.instance_iou_threshold = float(selection.pop('iou_threshold', 0.3))
+        self.instance_class_aware = selection.pop('class_aware', True)
+        if not 0 <= self.instance_score_threshold <= 1:
+            raise ValueError('score_threshold须在[0,1]范围内')
+        if self.instance_train_filter not in ('score_only', 'gt_quality'):
+            raise ValueError("train_filter须为'score_only'或'gt_quality'")
+        if self.instance_box_cost_threshold < 0 or not 0 <= self.instance_iou_threshold <= 1:
+            raise ValueError('box_cost_threshold须非负，iou_threshold须在[0,1]范围内')
+        if not isinstance(self.instance_class_aware, bool) or selection:
+            raise ValueError('class_aware须为布尔值，instance_selection含未知配置项')
     
     # 为什么额外写这个类？因为实例融合需要原检测接口没有返回的两项信息：
     # 1. 检测中间特征 source
@@ -129,8 +144,10 @@ class ProposalHead(CenterHead):
                                   cfg['min_radius'][task], post_max_size=cfg['post_max_size'])
                 ids = ids[torch.as_tensor(keep, device=ids.device, dtype=torch.long)]
         elif nms_type == 'rotate':
+            #*================================================#
             if cfg['score_threshold'] > 0:
                 ids = ids[scores[ids] >= cfg['score_threshold']]
+
             if ids.numel():
                 bev = meta['box_type_3d'](boxes[ids], coder.code_size).bev
                 scales = cfg.get('nms_scale', 1.0)
@@ -150,9 +167,51 @@ class ProposalHead(CenterHead):
             raise ValueError(f'Unsupported NMS type: {nms_type}')
         # 此阈值是预测分类分数门槛，不是与GT的IoU或特征相似度阈值。
         # 占据区域交集及实例数上限留给 BoxBEVFusion.build_edges，避免无交集框占配额。
-        return ids[scores[ids] >= self.instance_score_threshold] if for_instances else ids
+        #! 只跳过训练实例专用阈值；上游检测阈值、NMS及后续GT几何筛选仍然有效。
+        apply_score = not self.training or self.instance_train_score_filter
+        return ids[scores[ids] >= self.instance_score_threshold] if for_instances and apply_score else ids
 
-    def build_instances(self, predictions, source, metas, return_detections=False):
+    @torch.no_grad()
+    def _filter_instances_by_gt(self, item, meta, gt_bboxes, gt_labels):
+        """训练时按同类别 GT 质量过滤；GT 只决定保留与否，不替换预测框。"""
+        #* (11.23) 复用StreamOcc思路：box_cost<阈值或3D IoU>阈值即可保留。
+        count = len(item['boxes'])
+        if count == 0:
+            return item
+        if gt_bboxes is None or gt_labels is None or len(gt_bboxes) == 0:
+            return {key: value[:0] for key, value in item.items()}
+        device = item['boxes'].device
+        gt_bboxes = gt_bboxes.to(device)
+        gt_labels = gt_labels.to(device=device, dtype=torch.long)
+        if len(gt_bboxes) != len(gt_labels):
+            raise ValueError('GT框与GT类别数量不一致')
+
+        pred = item['boxes'].detach().float()
+        gt_center = gt_bboxes.gravity_center.float()
+        gt_dims = gt_bboxes.dims.float().clamp_min(1e-6)
+        # 对应本地 StreamOcc：0.25 * (2*中心L1 + 0.5*log尺寸L1)。
+        center_cost = (pred[:, None, :3] - gt_center[None]).abs().sum(-1)
+        size_cost = (pred[:, None, 3:6].clamp_min(1e-6).log()
+                     - gt_dims[None].log()).abs().sum(-1)
+        box_cost = .25 * (2. * center_cost + .5 * size_cost)
+
+        # 解码框的 z 是重心高度；LiDARInstance3DBoxes 需要底面中心高度。
+        pred_bottom = pred.clone()
+        pred_bottom[:, 2] -= pred_bottom[:, 5] * .5
+        box_type = meta['box_type_3d']
+        pred_boxes = box_type(pred_bottom, box_dim=pred_bottom.shape[-1])
+        iou = pred_boxes.overlaps(pred_boxes, gt_bboxes).to(device)
+
+        if self.instance_class_aware:
+            same_class = item['labels'][:, None] == gt_labels[None]
+            box_cost = box_cost.masked_fill(~same_class, float('inf'))
+            iou = iou.masked_fill(~same_class, -1.)
+        keep = ((box_cost.amin(dim=1) < self.instance_box_cost_threshold)
+                | (iou.amax(dim=1) > self.instance_iou_threshold))
+        return {key: value[keep] for key, value in item.items()}
+
+    def build_instances(self, predictions, source, metas, return_detections=False,
+                        gt_bboxes_3d=None, gt_labels_3d=None):
         """几何选择无梯度；最后 gather 在 no_grad 外，允许占据损失回传检测特征。"""
         #* (11.16) 设计目的：共用一次解码/NMS，同时保留完整检测输出和占据注入实例。
         # detections 用于推理输出/评估；instances 用于占据融合，额外携带来源网格特征。
@@ -163,6 +222,11 @@ class ProposalHead(CenterHead):
         batch, channels = source.shape[:2]
         if len(metas) != batch:
             raise ValueError('metas 与检测特征 batch 不一致')
+        use_gt_filter = self.training and self.instance_train_filter == 'gt_quality'
+        #* (11.23) GT筛选严格限制在训练期；推理仍沿用分数阈值、NMS和范围过滤。
+        if use_gt_filter and (gt_bboxes_3d is None or gt_labels_3d is None
+                              or len(gt_bboxes_3d) != batch or len(gt_labels_3d) != batch):
+            raise ValueError('gt_quality训练筛选需要与batch对应的GT框和GT类别')
         rows = [[] for _ in range(batch)]
         detection_rows = [[] for _ in range(batch)]
         offset = 0
@@ -186,7 +250,8 @@ class ProposalHead(CenterHead):
                     # 仅缩小实例集合，不改变上方保存的检测集合。
                     valid = torch.isfinite(boxes[b, keep]).all(-1) & torch.isfinite(scores[b, keep])
                     valid &= (boxes[b, keep, 3:6] > 0).all(-1)
-                    valid &= scores[b, keep] >= self.instance_score_threshold
+                    if not self.training or self.instance_train_score_filter:
+                        valid &= scores[b, keep] >= self.instance_score_threshold
                     keep = keep[valid]
                 
                 #* 3. 保存筛选后的实例及其来源索引，确保框、类别、特征来源逐行对应。
@@ -201,9 +266,15 @@ class ProposalHead(CenterHead):
         result = []
         for b, tasks in enumerate(rows):
             item = {key: torch.cat([task[key] for task in tasks]) for key in tasks[0]}
+            #! (11.23) 所有任务均未选中框时，cat 仍得到形状合法的空 Tensor；
+            #! 后续继续构造空实例字典，不在这里报错或伪造实例。
             # 实例跨任务按分数排序；检测输出仍保留任务拼接顺序，两路行号不保证对应。
             order = item['scores'].argsort(descending=True)
             item = {key: value[order] for key, value in item.items()}
+            if use_gt_filter:
+                # 分数阈值和NMS已在上游完成；这里只进一步检查预测框的GT几何质量。
+                item = self._filter_instances_by_gt(
+                    item, metas[b], gt_bboxes_3d[b], gt_labels_3d[b])
             # 几何解码/筛选无梯度，但这里保留 source 的梯度，允许占据损失回传检测特征。
             # 占据范围交集与融合实例数量上限由后续 BoxBEVFusion.build_edges 处理。
             item['features'] = flat[b, item['source_indices']]

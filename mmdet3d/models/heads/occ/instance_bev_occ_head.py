@@ -16,7 +16,8 @@ class InstanceBEVOCCHead2D(BEVOCCHead2D):
 
     def forward(self, img_feats, lidar_aug_matrix=None, lidar2ego=None,
                 occ_aug_matrix=None, instances=None):
-        # None 显式关闭实例融合，用于基线对照；空实例列表元素仍走可训练零更新。
+        # None 显式关闭实例融合，用于基线对照。
+        #! 空实例列表不等于 None：仍进入 BoxBEVFusion，由其跳过空边并返回未注入的 OCC 特征。
         if instances is None:
             return super().forward(img_feats, lidar_aug_matrix, lidar2ego, occ_aug_matrix)
         if isinstance(img_feats, (list, tuple)):

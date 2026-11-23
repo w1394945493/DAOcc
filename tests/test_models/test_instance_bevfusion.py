@@ -61,6 +61,20 @@ class TestBoxFusion(unittest.TestCase):
         b = self.fusion(bev, [twice], self.points[:1], self.bounds)
         torch.testing.assert_close(a,b)
 
+    def test_optional_attention_aggregation(self):
+        fusion = BoxBEVFusion(4, 8, max_instances=2, aggregation='attention',
+                              attention_channels=4)
+        item = self.item()
+        twice = {k: torch.cat([v, v]) for k, v in item.items()}
+        bev = torch.randn(1, 8, 2, 2, requires_grad=True)
+        single = fusion(bev, [item], self.points[:1], self.bounds)
+        duplicate = fusion(bev, [twice], self.points[:1], self.bounds)
+        # 完全相同实例的注意力权重均分，聚合结果不应因重复而加倍。
+        torch.testing.assert_close(single, duplicate)
+        single.square().sum().backward()
+        self.assertIsNotNone(fusion.attention_query.weight.grad)
+        self.assertIsNotNone(fusion.attention_key.weight.grad)
+
     def test_query_transform_matches_sampler(self):
         # 非方形网格、多BS、不同外参/增强；用实际采样器验证查询坐标。
         from mmdet3d.models.customs.cross_coordinate_sample import CrossCoordinateSample
@@ -184,6 +198,32 @@ class TestHeads(unittest.TestCase):
         occ.square().mean().backward()
         grad=head.shared_conv.conv.weight.grad
         self.assertIsNotNone(grad);self.assertGreater(grad.abs().sum().item(),0)
+
+    def test_optional_gt_quality_filter(self):
+        #* (11.23) 验证可选GT质量筛选及同类别约束，默认路径由其余回归测试覆盖。
+        from unittest.mock import patch
+        model = self.make_model().train()
+        head = model.heads['object']
+        head.instance_train_filter = 'gt_quality'
+        item = dict(
+            boxes=torch.tensor([[0., 0., 0., 2., 2., 2., 0., 0., 0.],
+                                [10., 0., 0., 2., 2., 2., 0., 0., 0.]]),
+            scores=torch.tensor([.9, .9]), labels=torch.tensor([0, 0]),
+            source_indices=torch.tensor([0, 1]), task_ids=torch.tensor([0, 0]))
+        # GT tensor使用底面中心z=-1，对应重心中心z=0。
+        gt = LiDARInstance3DBoxes(torch.tensor([[0., 0., -1., 2., 2., 2., 0., 0., 0.]]), box_dim=9)
+        with patch.object(LiDARInstance3DBoxes, 'overlaps', return_value=torch.zeros(2, 1)):
+            kept = head._filter_instances_by_gt(
+                item, dict(box_type_3d=LiDARInstance3DBoxes), gt, torch.tensor([0]))
+        self.assertEqual(kept['source_indices'].tolist(), [0])
+
+        # 同位置但类别不同也不能借用该GT通过几何筛选。
+        wrong = {key: value[:1].clone() for key, value in item.items()}
+        wrong['labels'].fill_(1)
+        with patch.object(LiDARInstance3DBoxes, 'overlaps', return_value=torch.zeros(1, 1)):
+            kept = head._filter_instances_by_gt(
+                wrong, dict(box_type_3d=LiDARInstance3DBoxes), gt, torch.tensor([0]))
+        self.assertEqual(len(kept['boxes']), 0)
 
     def test_train_eval_and_disabled_parity(self):
         model=self.make_model();head=model.heads['object']

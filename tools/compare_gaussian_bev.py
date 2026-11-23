@@ -359,6 +359,10 @@ def main():
     names=('BEVTransformV2','GaussianBEV')
     checkpoints=(args.baseline_checkpoint,args.gaussian_checkpoint)
     gaussian_derived_buffers=(
+        'encoders.camera.vtransform.geometry.fixed_scale',
+        'encoders.camera.vtransform.geometry.scale_min',
+        'encoders.camera.vtransform.geometry.scale_max',
+        'encoders.camera.vtransform.geometry.offset_limit',
         'encoders.camera.vtransform.geometry.covariance',
         'encoders.camera.vtransform.renderer.view',
         'encoders.camera.vtransform.renderer.projection',

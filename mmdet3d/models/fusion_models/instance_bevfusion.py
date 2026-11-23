@@ -120,7 +120,10 @@ class InstanceBEVFusion(BEVFusion):
         if self.instance_to_occ:
             if self.training:
                 #* 训练：筛选预测框仅为构建占据注入实例，不构建最终检测输出。
-                instances = detection.build_instances(predictions, source, metas)
+                #* (11.23) 传入GT供可选gt_quality筛选；默认score_only不会读取GT。
+                instances = detection.build_instances(
+                    predictions, source, metas,
+                    gt_bboxes_3d=gt_bboxes_3d, gt_labels_3d=gt_labels_3d)
             else:
                 #* 推理：共享解码与 NMS 的结果，同时返回注入实例和最终检测输出。
                 instances, detections = detection.build_instances(

@@ -2050,9 +2050,42 @@ python -m torch.distributed.run \
   --evaluation.interval 3862 \
   --max_keep_ckpt 1
 
+#* (11.23) 多卡训练：单帧训练：3D检测引导的实例级占据特征融合实验 训练时进一步根据框的几何质量筛选实例框
+# --model.heads.object.instance_selection.train_score_filter False # 取消训练分数门槛
+# -model.heads.object.instance_selection.score_threshold 0.3 \ 训练和推理的实例筛选都使用 0.3。当唯一例外：train_score_filter=False 时，训练跳过该分数门槛，推理仍使用 0.3。
+conda activate daocc-cu121
+cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
+CUDA_VISIBLE_DEVICES=5,6 \
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+PYTHONWARNINGS=ignore \
+python -m torch.distributed.run \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=2 \
+  tools/dist_train.py \
+  configs/nuscenes/occ3d/daocc_occ3d_nus_w_mask_instance_gaussian_bevtransform.yaml \
+  --launcher pytorch \
+  --run-dir /home/wangyushen/Data/Outputs/daocc/train/instance_bevfusion_gt_quality_gaussian_bevtransform \
+  --model.encoders.camera.backbone.init_cfg.checkpoint /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth \
+  --model.encoders.camera.vtransform.learn_gaussian_geometry true \
+  --model.heads.occ.instance_fusion.aggregation weighted_mean \
+  --model.heads.object.instance_selection.train_filter gt_quality \
+  --model.heads.object.instance_selection.score_threshold 0.3 \
+  --model.heads.object.multi_point_features False \
+  --model.heads.object.learnable_sampling False \
+  --model.heads.occ.instance_fusion.edge_matching False \
+  --model.heads.occ.instance_fusion.local_edges False \
+  --model.heads.object.roi_features False \
+  --data.samples_per_gpu 4 \
+  --data.workers_per_gpu 4 \
+  --max_epochs 6 \
+  --log_config.interval 50 \
+  --optimizer.lr 2.0e-4 \
+  --checkpoint_config.interval 3862 \
+  --evaluation.interval 3862 \
+  --max_keep_ckpt 1
 
-
-#*---------------------------------------------#
+#*====================================================================#
 #* (11.17) 流式占据预测：可视化各阶段BEV特征图
 # --steps 24 表示连续执行 24 次流式推理。
 # --shared-scale  共享色阶  更适合比较各阶段 BEV 特征的幅值变化：同一种颜色始终代表相同数值，能够看出细化、融合或 decoder 后特征整体增强还是减弱。
@@ -2186,6 +2219,9 @@ CUDA_VISIBLE_DEVICES=2,3 torchrun \
   --checkpoint_config.max_keep_ckpts 1 \
   --resume_from /home/wangyushen/Data/Outputs/daocc/train/stream_pre_guided_refine_g64_cbgs_faug_skip10_rev10/iter_66823.pth \
   --resume_from_EMA /home/wangyushen/Data/Outputs/daocc/train/stream_pre_guided_refine_g64_cbgs_faug_skip10_rev10/iter_66823_ema.pth
+
+
+
 
 #* =================================================================================================
 #* (11.21) GaussianLSSTransform实现

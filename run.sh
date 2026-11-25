@@ -2021,7 +2021,7 @@ python tools/visualize_instance_selection_stages.py \
 # -model.heads.object.instance_selection.score_threshold 0.3 \ 训练和推理的实例筛选都使用 0.3。当唯一例外：train_score_filter=False 时，训练跳过该分数门槛，推理仍使用 0.3。
 conda activate daocc-cu121
 cd /home/wangyushen/forks/CUDA-DAOcc/DAOcc
-CUDA_VISIBLE_DEVICES=5,6 \
+CUDA_VISIBLE_DEVICES=2,3 \
 PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
 PYTHONWARNINGS=ignore \
 python -m torch.distributed.run \
@@ -2048,7 +2048,9 @@ python -m torch.distributed.run \
   --optimizer.lr 2.0e-4 \
   --checkpoint_config.interval 3862 \
   --evaluation.interval 3862 \
-  --max_keep_ckpt 1
+  --max_keep_ckpt 1 \
+  --resume_from /home/wangyushen/Data/Outputs/daocc/train/instance_bevfusion_gt_quality/iter_73378.pth \
+
 
 #* (11.23) 多卡训练：单帧训练：3D检测引导的实例级占据特征融合实验 训练时进一步根据框的几何质量筛选实例框
 # --model.heads.object.instance_selection.train_score_filter False # 取消训练分数门槛
@@ -2365,6 +2367,8 @@ python -m torch.distributed.run \
   --checkpoint_config.interval 3862 \
   --evaluation.interval 3862 \
   --max_keep_ckpt 1
+
+
 
 #*========================================================
 #* (11.22) ppt 可视化

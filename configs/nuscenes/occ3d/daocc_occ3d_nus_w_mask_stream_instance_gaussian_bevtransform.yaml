@@ -1,0 +1,358 @@
+#* (2026-11-24) 基于stream_instance_bevfusion，替换为GaussianBEVTransform。
+# Gaussian参数沿用gaussian_bev_iter；同步适配fuser通道，保留时序与实例融合设置。
+#* (11.17) 基于流式配置组合当前帧实例注入；独立配置，不修改两份原实验配置。
+# Torchpack 只自动合并上级 default.yaml，因此保留流式配置完整模型与迭代训练设置。
+# 默认 decoder 前历史融合；实例注入发生在 decoder 后的占据头坐标采样之后。
+# 采样/增强沿用流式配置默认值，复现实验时仍须用命令行覆盖 CBGS、逐帧增强等设置。
+dataset_root: /home/wangyushen/Data/Datasets/Nuscenes/
+evaluation:
+  interval: 2000
+  jsonfile_prefix: /home/wangyushen/Data/Outputs/tmp
+  by_epoch: false
+  evaluate_last: true
+data:
+  samples_per_gpu: 1
+  workers_per_gpu: 2
+  train:
+    dataset:
+      #* (11.12) 与 StreamOcc 主训练配置一致：每个 scene 切成两个连续子序列。
+      # prepare_streaming_config 解开 CBGS 包装时，将此参数一并传给序列 Dataset。
+      sequences_split_num: 2
+      #* (11.13) 整段有放回 CBGS；段内有序，不自动扩大训练步数。
+      sequence_cbgs: false
+      #* (11.13) StreamOcc 风格随机跳帧、整段时间反序，默认关闭。
+      skip_prob: 0.0
+      sequence_flip_prob: 0.0
+      #* (11.12) StreamOcc 同名开关：true 子序列内几何增强一致，false 每帧独立增强。
+      keep_consistent_seq_aug: true
+      #* (11.12) 空检测 GT 顺序跳过；验证集不跳帧。
+      skip_empty_gt: true
+      ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_train.pkl
+  val:
+    #* (11.12) 与 StreamOcc 训练中验证一致：每卡 BS=1，完整连续序列，不切训练子序列。
+    samples_per_gpu: 1
+    sequences_split_num: 1
+    ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_val.pkl
+  test:
+    ann_file: /home/wangyushen/Data/Datasets/nuscenes_anns/anns/daocc/nuscenes_infos_val.pkl
+voxel_size: [0.075, 0.075, 0.2]
+point_cloud_range: [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+augment3d:
+  scale: [1.0, 1.0]
+  rotate: [-0.0, 0.0]
+  translate: 0.0
+model:
+  type: InstanceBEVFusion
+  instance_to_occ: true
+  encoders:
+    lidar:
+      voxelize:
+        type: Spconv2Voxelization
+        max_num_points: 10
+        point_cloud_range: ${point_cloud_range}
+        voxel_size: ${voxel_size}
+        max_voxels: [120000, 160000]
+      backbone:
+        type: SparseEncoderSpconv2
+        in_channels: 5
+        sparse_shape: [1440, 1440, 41]
+        output_channels: 128
+        order: [conv, norm, act]
+        encoder_channels: [[16, 16, 32], [32, 32, 64], [64, 64, 128], [128, 128]]
+        encoder_paddings: [[0, 0, 1], [0, 0, 1], [0, 0, [1, 1, 0]], [0, 0]]
+        block_type: basicblock
+    camera:
+      backbone:
+        type: ResNet
+        depth: 50
+        out_indices: [1, 2, 3]
+        init_cfg:
+          type: Pretrained
+          checkpoint: /home/wangyushen/Data/Weights/daocc/pretrained/htc_r50_backbone.pth
+      neck:
+        type: GeneralizedLSSFPN
+        in_channels: [512, 1024, 2048]
+        out_channels: 256
+        start_level: 0
+        num_outs: 3
+        norm_cfg:
+          type: BN2d
+          requires_grad: true
+        act_cfg:
+          type: ReLU
+          inplace: true
+        upsample_cfg:
+          mode: bilinear
+          align_corners: false
+      vtransform:
+        type: GaussianBEVTransform
+        in_channels: 256
+        out_channels: 128
+        image_size: [256, 704]
+        feature_size: [32, 88]
+        xbound: [-54.0, 54.0, 0.6]
+        ybound: [-54.0, 54.0, 0.6]
+
+        # 高斯中心/深度来源，可在以下两个版本之间切换：
+        #
+        # 1. center_source: lidar（当前使用）
+        #    直接使用输入点云中经过3D数据增强的LiDAR XYZ作为高斯中心，不预测深度分布。
+        #    LiDAR点投影到各相机后按32x88图像特征格分组，每个相机特征格至多生成一个高斯；
+        #    优先选当前帧最近点，没有当前帧点时再选历史sweep最近点。选中格直接提供
+        #    对应图像格预测feature、opacity、中心修正、尺度和旋转；所有相机均不可见的点
+        #    不生成相机高斯。gaussian_std设置尺度初值；下面的depth_num、depth_start、
+        #    depth_max和error_tolerance会被保留以方便切换，但不会参与计算。
+        #
+        # 2. center_source: depth
+        #    使用原GaussianLSS方式，由图像特征预测每个像素的离散深度概率分布。
+        #    对各深度候选点按概率求期望得到高斯中心，并由深度分布计算协方差。
+        #    此模式使用depth_num、depth_start、depth_max和error_tolerance；
+        #    gaussian_std不会参与计算。
+        center_source: lidar
+
+        # ------------------------- 高斯属性来源与可学习性 -------------------------
+        # 两种模式共同的可学习属性：
+        #   feature：可学习。由图像特征预测分支输出，每个高斯携带out_channels=128维特征。
+        #   opacity：可学习。由图像opacity预测分支经sigmoid输出，用于高斯筛选和alpha合成。
+        #
+        # center_source=lidar（当前模式）：
+        #   默认关闭几何学习：中心为选中LiDAR点，尺度固定为gaussian_std，
+        #   旋转固定为单位四元数[1,0,0,0]，不预测位置修正。
+        #   learn_gaussian_geometry=true时才学习中心修正、尺度和旋转。
+        #   高斯数量/点选择：不可学习，由相机可见性、当前帧优先和最近深度规则离散确定。
+        #
+        # center_source=depth（原GaussianLSS模式）：
+        #   深度概率：可学习，由图像分支预测depth_num个深度logits并执行softmax。
+        #   中心mean：不直接预测，由可学习深度概率对候选三维点加权求期望，因此可间接学习。
+        #   协方差：不直接预测，由同一深度概率的加权二阶矩计算，因此可间接学习。
+        #   尺度/旋转：没有独立预测头，可由上述协方差的特征值/特征向量间接表示。
+        #
+        # 两种模式共同的预设光栅化规则：CUDA光栅化器会给BEV二维协方差增加0.3像素方差，
+        # 再以最长主轴的3sigma计算候选包围半径；这些数值目前是CUDA代码中的固定值，
+        # 不是网络学习参数。
+        # --------------------------------------------------------------------------
+
+        # center_source=depth时生效：在[depth_start, depth_max]内建立depth_num个均匀深度bin。
+        depth_num: 64
+        depth_start: 1.0
+        depth_max: 61.0
+        # center_source=depth时生效：缩放由深度概率分布计算得到的高斯协方差。
+        error_tolerance: 0.5
+
+        # center_source=lidar时生效：X/Y/Z尺度初值，单位为米。
+        # 关闭几何学习时始终作为固定尺度；开启时作为尺度初值。
+        gaussian_std: [0.3, 0.3, 0.3]
+        # 默认false，保持固定尺度、单位旋转和零位置修正，也不创建几何预测头。
+        learn_gaussian_geometry: false # 可学习尺度，旋转和位置修正
+        # 以下三项仅在learn_gaussian_geometry=true时生效。
+        # 尺度logits经sigmoid后，在对数空间映射到以下范围，单位为米。
+        gaussian_scale_min: [0.08, 0.08, 0.08]
+        gaussian_scale_max: [0.64, 0.64, 0.64]
+        # 中心修正logits经tanh后的XYZ最大绝对偏移，单位为米。
+        center_offset_limit: [0.3, 0.3, 0.2]
+        # center_source=lidar时生效：点特征第5维（索引4）是相对当前关键帧的时间差。
+        # 每个相机特征格最多保留一个点；优先当前帧时间差为0的点并选择最近深度，
+        # 当前帧没有投影点时才从历史sweep点中选择最近深度。
+        lidar_time_dimension: 4
+        current_time_epsilon: 1.0e-6
+
+        # 两种模式均生效：光栅化前过滤opacity不大于该阈值的高斯。
+        opacity_filter: 0.01
+        # 两种模式均生效：图像预测分支的中间通道数；LiDAR模式新增几何分支也使用该值。
+        interm_channels: 256
+  fuser:
+    type: ConvFuser
+    # Gaussian相机BEV输出128通道；LiDAR输出256通道。
+    in_channels: [128, 256]
+    out_channels: 512
+  decoder:
+    backbone:
+      type: CustomResNet
+      stride: [1, 1, 2]
+      numC_input: 512
+      num_channels: [128, 256, 512]
+    neck:
+      type: FPN_LSS
+      in_channels: 640
+      out_channels: 512
+      scale_factor: 2
+      extra_upsample: null
+  heads:
+    map: null
+    object:
+      type: ProposalHead
+      #* (11.19) ROI 模式优先；开启后不创建多点偏移/权重网络，原配置行为默认保留。
+      roi_features: false #! 未见有效；或混合精度训练报nan
+      roi_output_size: 3  # 每个框对齐为 3×3 区域特征，再空间平均。
+      roi_sampling_ratio: 2  # 每区域 2×2 个插值点，共36点，无新增可学习参数。
+      #* (11.19) 仅以框内采样特征自适应聚合；multi_point_features=false 恢复单点。
+      multi_point_features: false
+      learnable_sampling: false  # false：固定五点；true：由实例特征预测框内偏移。
+      sampling_points: 5  # 可学习采样点数 K；来源网格仅预测偏移和权重，不混入实例特征。
+      instance_selection:
+        score_threshold: 0.3
+        #* (11.23) 新增可选训练期GT质量筛选，默认关闭以保持原实验行为。
+        # 默认 score_only 保持原筛选；改为 gt_quality 后仅在训练时进一步要求：
+        # 同类别GT的 box_cost < 1.5 或 3D IoU > 0.3。推理始终保持原筛选。
+        train_filter: score_only
+        #* (11.23) false仅取消训练实例分数门槛；检测阈值/NMS/GT筛选仍生效，推理不变。
+        train_score_filter: true
+        box_cost_threshold: 1.5
+        iou_threshold: 0.3
+        class_aware: true
+      in_channels: 512
+      train_cfg:
+        point_cloud_range: ${point_cloud_range}
+        grid_size: [1440, 1440, 41]
+        voxel_size: ${voxel_size}
+        out_size_factor: 8
+        dense_reg: 1
+        gaussian_overlap: 0.1
+        max_objs: 500
+        min_radius: 2
+        code_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2]
+      test_cfg:
+        post_center_limit_range: [-61.2, -61.2, -10.0, 61.2, 61.2, 10.0]
+        max_per_img: 500
+        max_pool_nms: false
+        min_radius: [4, 12, 10, 1, 0.85, 0.175]
+        score_threshold: 0.1
+        out_size_factor: 8
+        voxel_size: ${voxel_size[:2]}
+        nms_type: [circle, rotate, rotate, circle, rotate, rotate]
+        nms_scale: [[1.0], [1.0, 1.0], [1.0, 1.0], [1.0], [1.0, 1.0], [2.5, 4.0]]
+        pre_max_size: 1000
+        post_max_size: 83
+        nms_thr: 0.2
+      tasks:
+        - [car]
+        - [truck, construction_vehicle]
+        - [bus, trailer]
+        - [barrier]
+        - [motorcycle, bicycle]
+        - [pedestrian, traffic_cone]
+      common_heads:
+        reg: [2, 2]
+        height: [1, 2]
+        dim: [3, 2]
+        rot: [2, 2]
+        vel: [2, 2]
+      share_conv_channel: 64
+      bbox_coder:
+        type: CenterPointBBoxCoder
+        pc_range: ${point_cloud_range}
+        post_center_range: [-61.2, -61.2, -10.0, 61.2, 61.2, 10.0]
+        max_num: 500
+        score_threshold: 0.1
+        out_size_factor: 8
+        voxel_size: ${voxel_size[:2]}
+        code_size: 9
+      separate_head:
+        type: SeparateHead
+        init_bias: -2.19
+        final_kernel: 3
+      loss_cls:
+        type: GaussianFocalLoss
+        reduction: mean
+      loss_bbox:
+        type: L1Loss
+        reduction: mean
+        loss_weight: 0.25
+      norm_bbox: true
+    occ:
+      type: InstanceBEVOCCHead2D
+      instance_fusion:
+        type: BoxBEVFusion
+        #* (11.19) 聚合前逐边匹配；局部枚举仍保留旋转框精确检查。
+        edge_matching: false #! 未见有效
+        local_edges: false
+        #* (11.23) 实例消息聚合方式：weighted_mean 保持原实现，按检测分数及 edge_matching
+        # 输出的匹配程度加权平均同一 OCC 单元收到的多条实例消息。
+        aggregation: weighted_mean #! 若需由 OCC 特征主动选择实例，将上一项改为 attention。
+        # attention 使用 OCC 特征作 Query、实例消息作 Key，并把检测分数作为注意力先验；
+        # softmax 仅在同一个 OCC 单元关联的实例之间计算。
+        attention_channels: 32  # 仅 aggregation=attention 时创建并使用，越大计算量越高
+        instance_channels: 64
+        bev_channels: 128
+        num_classes: 10
+        max_instances: 100
+        gate_init: 0.01
+      in_dim: 128
+      out_dim: 128
+      Dz: 16
+      use_mask: true
+      num_classes: 18
+      use_predicter: true
+      class_balance: false
+      loss_occ:
+        type: CrossEntropyLoss
+        use_sigmoid: false
+        ignore_index: 255
+        loss_weight: 1.0
+      coordinate_transform:
+        type: CrossCoordinateSample
+        point_range: [-40.0, 40.0, -40.0, 40.0, 0.0, 0.0]
+        point_num: [200, 200, 1]
+        lidar_point_range: [-54.0, 54.0, -54.0, 54.0]
+        in_dim: 512
+        out_dim: 128
+  loss_scale:
+    object: 0.01
+    occ: 1.0
+optimizer:
+  type: AdamW
+  lr: 0.0002
+  weight_decay: 0.01
+optimizer_config:
+  grad_clip:
+    max_norm: 35
+    norm_type: 2
+lr_config:
+  policy: CosineAnnealing
+  warmup: linear
+  warmup_iters: 500
+  warmup_ratio: 0.33333333
+  min_lr_ratio: 0.001
+  by_epoch: false
+max_epochs: 6
+streaming:
+  enabled: true
+  cache_enabled: true
+  #* (11.15) True：多模态融合后、decoder 前；False：decoder 后。
+  # 本组合默认 decoder 前融合。历史缓存跟随该位置；关闭历史融合时，也在选定位置缓存。
+  # 本配置两处均为 512 通道；其他架构需同步核对 history_fusion.channels 和 BEV 空间范围。
+  fuse_before_decoder: true
+  #* (11.16) 开启历史融合并缓存融合结果；可选是否先做二维 RefineNet 细化，暂无辅助监督。
+  # 默认开启融合；仅缓存对比实验可用 --streaming.history_fusion.enabled False。
+  history_fusion:
+    enabled: true
+    #* (11.16) true：历史细化后拼接融合（默认）；false：直接拼接历史与当前特征并融合。
+    use_refine: true
+    channels: 512
+    internal_channels: 128
+  #* (11.12) 参照 StreamOcc 逆向位姿采样，适配 DAOcc 的 [B,C,X,Y] BEV。
+  # 使用当前增强 LiDAR 系 z=0 平面；范围取顶层 point_cloud_range，网格使用格心。
+  bev_warp:
+    enabled: true
+    plane_z: 0.0
+  #* (11.12) 维护并按迭代保存 EMA；训练中评估仍使用当前训练权重。
+  # 保存间隔和保留数量默认继承 checkpoint_config，EMA 文件保存在训练目录。
+  ema:
+    enabled: true
+    decay: 0.9990
+#* (11.12) 与 StreamOcc 一致：普通训练状态和 EMA 状态分别显式恢复。
+# 训练中流式评估仍按 DAOcc 使用当前训练权重。
+resume_from_EMA: null
+runner:
+  type: IterBasedRunner
+  max_iters: 21096
+custom_hooks: null
+checkpoint_config:
+  by_epoch: false
+  interval: 2000
+  save_last: true
+  save_optimizer: true
+  max_keep_ckpts: 1
+augment2d:
+  gridmask:
+    fixed_prob: true

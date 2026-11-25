@@ -282,7 +282,8 @@ def _fill_trainval_infos(nusc, train_scenes, val_scenes, test=False, max_sweeps=
                 ],
                 dtype=bool,
             ).reshape(-1)
-            # convert velo from global to lidar
+            #* 数据转换时，nuScenes提供的全局速度被旋转到当前帧 LiDAR 坐标系：
+            # convert velo from global to lidar 
             for i in range(len(boxes)):
                 velo = np.array([*velocity[i], 0.0])
                 velo = velo @ e2g_inv_t @ l2e_inv_t

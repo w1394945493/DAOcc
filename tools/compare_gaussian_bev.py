@@ -78,7 +78,18 @@ def arguments():
     p.set_defaults(measure_performance=True)
     p.add_argument('--max-gaussians-vis', type=int, default=0,
                    help='椭圆图最多绘制的高斯数；0表示绘制全部，超限时按opacity保留')
-    a = p.parse_args()
+    a, overrides = p.parse_known_args()
+    # 2026-11-24：点路径参数仅覆盖Gaussian模型，避免将其专用参数传给基线。
+    if len(overrides) % 2:
+        p.error('配置覆盖须使用 --model.xxx value 成对传入')
+    a.gaussian_overrides = []
+    for key, value in zip(overrides[::2], overrides[1::2]):
+        if not key.startswith('--model.'):
+            p.error('未知参数：' + key + '；配置覆盖仅支持 --model.xxx')
+        # Torchpack使用Python字面量；将小写true/false转换为真正的布尔值。
+        if value.lower() in ('true', 'false'):
+            value = str(value.lower() == 'true')
+        a.gaussian_overrides.extend([key, value])
     if (a.num_samples < 1 or a.repeat < 1 or a.warmup < 0 or
             a.start_index < 0 or a.max_gaussians_vis < 0):
         p.error('num-samples/repeat必须为正；warmup/start-index/max-gaussians-vis不能为负')
@@ -319,8 +330,10 @@ def main():
     torch.cuda.set_device(args.gpu)
     configs=[]
     with suppress_external_output():
-        for path in (args.baseline_config,args.gaussian_config):
+        for model_index, path in enumerate((args.baseline_config,args.gaussian_config)):
             raw=TorchConfig(); raw.load(str(path.resolve()),recursive=True)
+            if model_index == 1:
+                raw.update(args.gaussian_overrides)
             configs.append(Config(recursive_eval(raw)))
     for key in ('type','ann_file','pipeline'):
         if configs[0].data.val.get(key) != configs[1].data.val.get(key):
